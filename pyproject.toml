@@ -1,0 +1,10 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "mitreattack-python>=5.3.0",
+    "pandas>=2.3.3",
+    "requests>=2.32.5",
+]

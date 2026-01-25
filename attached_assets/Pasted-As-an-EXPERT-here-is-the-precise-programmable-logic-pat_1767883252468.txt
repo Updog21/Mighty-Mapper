@@ -1,0 +1,130 @@
+As an **EXPERT**, here is the precise, programmable logic path using the **MITRE v18 STIX** data structure.
+
+This is the exact algorithm you would write in code (Python/STIX2) to move from a "Product Name" to a specific "Log Requirement."
+
+### **The "Threat-Informed" Evaluation Path (v18)**
+
+```mermaid
+graph LR
+    %% Nodes
+    Prod[1. Product]
+    Asset[2. Asset]
+    Tech[3. Technique]
+    Strat[4. Detection Strategy]
+    Analytic[5. Analytic]
+    Data[6. Data Component]
+    Log[7. Vendor Log]
+
+    %% Relationships
+    Prod -- "Manual Abstraction" --> Asset
+    Tech -- "targets (rel)" --> Asset
+    Strat -- "detects (rel)" --> Tech
+    Analytic -- "implements (ref)" --> Strat
+    Analytic -- "uses (ref)" --> Data
+    Data -- "Validation" --> Log
+
+    %% Styles
+    classDef blue fill:#e1f5fe,stroke:#01579b;
+    classDef red fill:#ffcdd2,stroke:#c62828;
+    classDef green fill:#e8f5e9,stroke:#2e7d32;
+    class Prod,Asset blue;
+    class Tech red;
+    class Strat,Analytic,Data green;
+    class Log blue;
+
+```
+
+---
+
+### **Detailed Logic Step-by-Step**
+
+#### **1. The Input Hop: Product  Asset**
+
+* **The Logic:** Map the Vendor Name to a standard MITRE v18 Asset Class.
+* **Mechanism:** Manual Lookup or "Wizard" Dictionary.
+* **Key Question:** "What *function* does this box perform?"
+* **Example:**
+* **Input:** "Cisco Meraki MX"
+* **Mapped Asset:** `Firewall` (STIX ID: `x-mitre-asset--[uuid]`)
+
+
+
+#### **2. The Threat Hop: Asset  (targets)  Technique**
+
+* **The Logic:** Identify which techniques explicitly attack this asset type.
+* **STIX Query:** Find `Relationship` objects where:
+* `relationship_type` == `'targets'`
+* `target_ref` == `[Asset_ID]`
+
+
+* **Output:** List of `Technique` objects (e.g., **T1562.004**: *Impair Defenses: Disable or Modify System Firewall*).
+
+#### **3. The Strategy Hop: Technique  (detects)  Strategy**
+
+* **The Logic:** Retrieve the abstract logic defined by MITRE to catch this technique.
+* **STIX Query:** Find `Relationship` objects where:
+* `relationship_type` == `'detects'`
+* `target_ref` == `[Technique_ID]`
+* `source_ref_type` == `'x-mitre-detection-strategy'`
+
+
+* **Output:** `Detection Strategy` objects (e.g., **DS0015**: *Detect changes to firewall configuration settings*).
+
+#### **4. The Analytic Hop: Strategy  (implements)  Analytic**
+
+* **The Logic:** Find the specific pseudocode or query logic that implements the strategy.
+* **STIX Query:** Find `x-mitre-analytic` objects where:
+* The property `detection_strategy_refs` CONTAINS `[Strategy_ID]`
+
+
+* **Output:** `Analytic` objects (e.g., **AN-1234**: *Alert when firewall rules are modified by non-admin user*).
+
+#### **5. The Requirement Hop: Analytic  (uses)  Data Component**
+
+* **The Logic:** Identify the standardized data element required to run that analytic.
+* **STIX Query:** Read the `data_component_refs` property inside the `Analytic` object.
+* **Output:** `Data Component` object (e.g., **Network Device: Configuration Modification**).
+
+#### **6. The Validation Hop: Data Component  Log**
+
+* **The Logic:** Verify if the specific vendor product outputs this data.
+* **Mechanism:** Manual Verification against Vendor Documentation (Syslog Guide).
+* **The Test:**
+* *Requirement:* `Network Device: Configuration Modification`
+* *Vendor Check:* Does Meraki have an "Audit Log"? **Yes.**
+* *Result:* **CRITICAL VALUE FOUND.**
+
+
+
+---
+
+### **Summary of the Code Logic**
+
+If you were writing this in the Python script, the loop would look like this:
+
+```python
+# Pseudo-code logic
+asset_id = lookup_asset_id("Firewall") 
+
+# Step 2: Find Threats
+threats = stix.find_relationships(type='targets', target=asset_id)
+
+for threat in threats:
+    technique_id = threat.source_ref
+    
+    # Step 3: Find Strategies
+    strategies = stix.find_relationships(type='detects', target=technique_id)
+    
+    for strategy_rel in strategies:
+        strategy_id = strategy_rel.source_ref
+        
+        # Step 4: Find Analytics (Reverse lookup)
+        analytics = stix.find_objects(type='analytic', filter={'strategy_refs': strategy_id})
+        
+        for analytic in analytics:
+            # Step 5: Get Requirements
+            required_components = analytic.data_component_refs
+            
+            print(f"To catch {technique_id} via {analytic.name}, you NEED: {required_components}")
+
+```

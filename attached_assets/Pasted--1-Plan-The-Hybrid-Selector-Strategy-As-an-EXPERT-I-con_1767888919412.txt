@@ -1,0 +1,72 @@
+### **1. Plan: The "Hybrid Selector" Strategy**
+
+As an **EXPERT**, I confirm that **YES**, this is the single most accurate way to build your tool.
+
+Since MITRE splits the world into "Boxes" (Assets) and "Environments" (Platforms), you cannot ask the user "What Asset is this?" because they might say "AWS" (which is a Platform).
+
+Instead, you must present a **Unified Dropdown** to the user. Behind the scenes, your app will tag each option as either an `ASSET` or a `PLATFORM` and route the logic accordingly.
+
+---
+
+### **2. The Master List for Your UI**
+
+You should present the following consolidated list to your user. This covers 95% of use cases.
+
+* **Column A:** What the User Sees (Friendly Name)
+* **Column B:** What your Code uses (Backend Mapping)
+
+| User Selection (Dropdown) | Backend Type | Backend Value (MITRE ID/String) |
+| --- | --- | --- |
+| **Firewall / Security Appliance** | **ASSET** | `Firewall` (A0016) |
+| **Router / Gateway** | **ASSET** | `Router` (A0014) |
+| **Network Switch** | **ASSET** | `Switch` (A0015) |
+| **Server (Physical/Virtual)** | **ASSET** | `Server` (A0013) |
+| **Domain Controller / Identity Provider** | **PLATFORM** | `Identity Provider` / `Azure AD` |
+| **Cloud Environment (AWS/Azure/GCP)** | **PLATFORM** | `IaaS` |
+| **SaaS Application (M365/Salesforce)** | **PLATFORM** | `SaaS` / `Office 365` |
+| **Windows Endpoint** | **PLATFORM** | `Windows` |
+| **Linux Server/Endpoint** | **PLATFORM** | `Linux` |
+| **macOS Endpoint** | **PLATFORM** | `macOS` |
+| **Container / Kubernetes** | **PLATFORM** | `Containers` |
+
+---
+
+### **3. The Logic Flow (Backend Routing)**
+
+When the user makes a selection, your code must "fork" the logic path because Assets and Platforms are queried differently.
+
+#### **Path A: User selects an ASSET (e.g., "Firewall")**
+
+* **Logic:** You are looking for **Targeting**.
+* **Query:** Find Techniques where `relationship_type='targets'` AND `target_ref='[Firewall_UUID]'`.
+* **Result:** Techniques like **T1562** (Impair Defenses).
+
+#### **Path B: User selects a PLATFORM (e.g., "AWS / IaaS")**
+
+* **Logic:** You are looking for **Applicability**.
+* **Query:** Find Techniques where the `x_mitre_platforms` list property contains `"IaaS"`.
+* **Result:** Techniques like **T1078** (Valid Cloud Accounts).
+
+---
+
+### **4. Example: How this improves accuracy**
+
+Let's look at **"Cisco Meraki"**.
+
+* **Scenario 1 (Bad):** You just map it to "Network".
+* *Result:* You get generic network noise.
+
+
+* **Scenario 2 (Good - Your New Approach):**
+* User selects: **"Firewall / Security Appliance"** (Asset).
+* *Logic:* Your app queries `targets`  `Firewall`.
+* *Result:* You explicitly get **T1562.004 (Disable System Firewall)**.
+* *Benefit:* This technique **ONLY** appears because you selected the Asset. If you had just selected "Linux" (the OS it runs on), you would have missed this specific firewall-killing technique.
+
+
+
+### **5. Summary for the Developer**
+
+Tell your developer:
+
+> *"Create one single dropdown. Use the table above to map each item to either `x-mitre-asset` OR `x-mitre-platforms`. If it's an Asset, query relationships. If it's a Platform, filter the technique list properties."*

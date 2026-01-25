@@ -1,0 +1,296 @@
+import os
+import sys
+import requests
+import yaml
+import toml
+import glob
+import pandas as pd
+from stix2 import MemoryStore, Filter
+from collections import defaultdict
+
+# --- CONFIGURATION ---
+STIX_URL = "https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json"
+
+# Local paths to community repos (relative to this script)
+REPO_PATHS = {
+    "SIGMA": "./sigma/rules",
+    "SPLUNK": "./security_content/detections",
+    "ELASTIC": "./detection-rules/rules"
+}
+
+class UnifiedVendorAssessor:
+    def __init__(self):
+        print("[-] Initializing Unified Assessor...")
+        self.stix_data = None
+        
+        # Indexes for O(1) Lookups
+        self.technique_map = {}      # ID (T1059) -> UUID
+        self.rev_technique_map = {}  # UUID -> ID
+        self.asset_cache = {}        # Name (lowercase) -> UUID
+        
+        # Graph Relationship Caches
+        self.rels_targets = defaultdict(list) # Asset UUID -> [Technique UUIDs]
+        self.rels_detects = defaultdict(list) # Technique UUID -> [Strategy UUIDs]
+        self.analytic_map = defaultdict(list) # Strategy UUID -> [Analytic Objects]
+        
+        # Community Data Cache
+        self.community_coverage = defaultdict(set) # T-Code -> { 'Sigma', 'Splunk', 'Elastic' }
+
+    # =========================================================================
+    # PART 1: OFFICIAL MITRE v18 INGESTION
+    # =========================================================================
+    def ingest_mitre_data(self):
+        print(f"[-] Downloading MITRE v18 STIX Data from official repo...")
+        try:
+            stix_json = requests.get(STIX_URL).json()
+            self.stix_data = MemoryStore(stix_data=stix_json)
+        except Exception as e:
+            print(f"[!] Critical Error downloading STIX data: {e}")
+            sys.exit(1)
+
+        print("[-] Building Knowledge Graph (Assets -> Threats -> Logic)...")
+        
+        # 1. Index Techniques & Assets
+        # Querying for attack-patterns (Techniques) and x-mitre-assets
+        query_filter = [Filter("type", "in", ["attack-pattern", "x-mitre-asset"])]
+        for obj in self.stix_data.query(query_filter):
+            if obj.type == "attack-pattern":
+                for ref in obj.external_references:
+                    if ref.source_name == "mitre-attack":
+                        self.technique_map[ref.external_id] = obj.id
+                        self.rev_technique_map[obj.id] = ref.external_id
+            elif obj.type == "x-mitre-asset":
+                self.asset_cache[obj.name.lower()] = obj.id
+
+        # 2. Index Relationships ('targets' and 'detects')
+        # targets: Technique -> Asset
+        # detects: Strategy -> Technique
+        rels = self.stix_data.query([Filter("type", "=", "relationship")])
+        for r in rels:
+            if r.relationship_type == "targets":
+                self.rels_targets[r.target_ref].append(r.source_ref)
+            elif r.relationship_type == "detects":
+                self.rels_detects[r.target_ref].append(r.source_ref)
+
+        # 3. Index Analytics (Link to Strategies)
+        # Property: x_mitre_detection_strategy_refs
+        analytics = self.stix_data.query([Filter("type", "=", "x-mitre-analytic")])
+        for a in analytics:
+            if hasattr(a, "x_mitre_detection_strategy_refs"):
+                for strat_ref in a.x_mitre_detection_strategy_refs:
+                    self.analytic_map[strat_ref].append(a)
+
+        print(f"[+] Graph Built: {len(self.technique_map)} Techniques and {len(self.asset_cache)} Assets indexed.")
+
+    # =========================================================================
+    # PART 2: COMMUNITY HARVESTER
+    # =========================================================================
+    def harvest_community_rules(self, vendor_keyword):
+        if not vendor_keyword:
+            return
+            
+        print(f"[-] Scanning local repos for vendor keyword: '{vendor_keyword}'...")
+        keyword = vendor_keyword.lower()
+        found_count = 0
+
+        # --- SIGMA SCAN ---
+        if os.path.exists(REPO_PATHS["SIGMA"]):
+            for f in glob.glob(os.path.join(REPO_PATHS["SIGMA"], "**/*.yml"), recursive=True):
+                try:
+                    with open(f, 'r', encoding='utf-8') as yf:
+                        docs = list(yaml.safe_load_all(yf))
+                        for doc in docs:
+                            if not doc or 'logsource' not in doc: continue
+                            ls = doc['logsource']
+                            # Check product, service, or definition
+                            prod = str(ls.get('product') or ls.get('service') or ls.get('definition') or '').lower()
+                            
+                            if keyword in prod:
+                                if 'tags' in doc:
+                                    for tag in doc['tags']:
+                                        if tag.startswith('attack.t'):
+                                            t_code = tag.split('.')[1].upper()
+                                            self.community_coverage[t_code].add("Sigma")
+                                            found_count += 1
+                except: continue
+
+        # --- SPLUNK SCAN ---
+        if os.path.exists(REPO_PATHS["SPLUNK"]):
+            for f in glob.glob(os.path.join(REPO_PATHS["SPLUNK"], "**/*.yml"), recursive=True):
+                try:
+                    with open(f, 'r', encoding='utf-8') as yf:
+                        doc = yaml.safe_load(yf)
+                        if not doc: continue
+                        
+                        # Splunk tags often have 'data_source' or we check the search query
+                        # Simple heuristic: Check if keyword is in the raw text of the file
+                        # (Parsing deeply nested Splunk YAMLs varies by version)
+                        content_str = str(doc).lower()
+                        if keyword in content_str:
+                            tags = doc.get('tags', {})
+                            mitre_ids = tags.get('mitre_attack_id', [])
+                            for tid in mitre_ids:
+                                self.community_coverage[tid].add("Splunk")
+                                found_count += 1
+                except: continue
+
+        # --- ELASTIC SCAN ---
+        if os.path.exists(REPO_PATHS["ELASTIC"]):
+            for f in glob.glob(os.path.join(REPO_PATHS["ELASTIC"], "**/*.toml"), recursive=True):
+                try:
+                    with open(f, 'r', encoding='utf-8') as tf:
+                        doc = toml.load(tf)
+                        rule = doc.get('rule', {})
+                        # Elastic uses 'index' or 'query'
+                        rule_text = str(rule).lower()
+                        
+                        if keyword in rule_text:
+                            threats = rule.get('threat', [])
+                            for threat in threats:
+                                for tech in threat.get('technique', []):
+                                    tid = tech.get('id')
+                                    if tid:
+                                        self.community_coverage[tid].add("Elastic")
+                                        found_count += 1
+                except: continue
+        
+        print(f"[+] Harvesting Complete. Found relevant community rules for {len(self.community_coverage)} unique techniques.")
+
+    # =========================================================================
+    # PART 3: THREAT MODELING & REPORTING
+    # =========================================================================
+    def run_assessment(self, product_name, asset_type):
+        """
+        Main Logic: 
+        1. Find Asset UUID
+        2. Find Techniques targeting Asset
+        3. For each Technique -> Find Strategies -> Analytics -> Data Components
+        4. Cross-reference with Community Coverage
+        """
+        print(f"\n--- STARTING ASSESSMENT FOR: {product_name} ({asset_type}) ---")
+        
+        # 1. Resolve Asset
+        asset_uuid = self.asset_cache.get(asset_type.lower())
+        if not asset_uuid:
+            print(f"[!] Error: Asset class '{asset_type}' not found in MITRE v18.")
+            print(f"    Available Assets (first 10): {list(self.asset_cache.keys())[:10]}")
+            return
+
+        # 2. Get Threat Model (Targeting Techniques)
+        threat_uuids = self.rels_targets.get(asset_uuid, [])
+        if not threat_uuids:
+            print(f"[!] No explicit targeting found for asset '{asset_type}'.")
+            return
+            
+        print(f"[-] Threat Model: Found {len(threat_uuids)} Techniques explicitly targeting '{asset_type}'.")
+
+        results = []
+
+        # 3. Traverse the Graph
+        for tech_uuid in threat_uuids:
+            t_code = self.rev_technique_map.get(tech_uuid, "Unknown")
+            technique_obj = self.stix_data.get(tech_uuid)
+            t_name = technique_obj.name
+
+            # Check Community Coverage
+            sources = list(self.community_coverage.get(t_code, []))
+            has_coverage = len(sources) > 0
+
+            # Find Official Strategies (detects)
+            strat_uuids = self.rels_detects.get(tech_uuid, [])
+            
+            # CASE A: Technique exists, but MITRE has no Strategy yet (Data Gap)
+            if not strat_uuids:
+                 results.append({
+                    "Technique_ID": t_code,
+                    "Technique_Name": t_name,
+                    "Community_Rules": ", ".join(sources) if has_coverage else "None",
+                    "Coverage_Status": "Covered" if has_coverage else "Gap",
+                    "Official_Strategy": "No Strategy Defined in v18",
+                    "Analytic_Logic": "N/A",
+                    "Required_Log_Source": "Unknown",
+                    "Required_Data_Component": "Unknown"
+                })
+                 continue
+
+            # CASE B: Strategies exist
+            for s_uuid in strat_uuids:
+                strategy = self.stix_data.get(s_uuid)
+                analytics = self.analytic_map.get(s_uuid, [])
+                
+                # Sub-case: Strategy exists but no Analytic (Abstract only)
+                if not analytics:
+                    results.append({
+                        "Technique_ID": t_code,
+                        "Technique_Name": t_name,
+                        "Community_Rules": ", ".join(sources) if has_coverage else "None",
+                        "Coverage_Status": "Covered" if has_coverage else "Gap",
+                        "Official_Strategy": strategy.name,
+                        "Analytic_Logic": "No Analytic Defined",
+                        "Required_Log_Source": "Unknown",
+                        "Required_Data_Component": "Unknown"
+                    })
+                
+                # Sub-case: Full chain exists
+                for analytic in analytics:
+                    # Get Data Components
+                    if hasattr(analytic, "x_mitre_data_component_refs"):
+                        for dc_ref in analytic.x_mitre_data_component_refs:
+                            dc = self.stix_data.get(dc_ref)
+                            
+                            # Resolve Data Source Name (Parent of Component)
+                            ds_name = "Unknown Source"
+                            if hasattr(dc, "x_mitre_data_source_ref"):
+                                ds_obj = self.stix_data.get(dc.x_mitre_data_source_ref)
+                                if ds_obj:
+                                    ds_name = ds_obj.name
+
+                            results.append({
+                                "Technique_ID": t_code,
+                                "Technique_Name": t_name,
+                                "Community_Rules": ", ".join(sources) if has_coverage else "None",
+                                "Coverage_Status": "Covered" if has_coverage else "Gap",
+                                "Official_Strategy": strategy.name,
+                                "Analytic_Logic": analytic.name,
+                                "Required_Log_Source": ds_name,
+                                "Required_Data_Component": dc.name
+                            })
+
+        # 4. Export
+        if results:
+            df = pd.DataFrame(results)
+            # Clean up duplicates (same technique might have multiple similar analytics)
+            df = df.drop_duplicates(subset=["Technique_ID", "Required_Data_Component"])
+            
+            filename = f"{product_name.replace(' ', '_')}_Value_Assessment.csv"
+            df.to_csv(filename, index=False)
+            print(f"\n[+] SUCCESS. Report generated: {filename}")
+            print(f"[-] Total Rows: {len(df)}")
+            print("\nPreview of Required Logs:")
+            print(df[['Technique_ID', 'Required_Log_Source', 'Required_Data_Component']].head(10).to_string(index=False))
+        else:
+            print("[!] No results found. Check your Asset Name input.")
+
+# --- MAIN EXECUTION ---
+if __name__ == "__main__":
+    tool = UnifiedVendorAssessor()
+    
+    # Step 1: Ingest
+    tool.ingest_mitre_data()
+    
+    # Step 2: User Input
+    print("\n" + "="*50)
+    print(" VENDOR VALUE ASSESSOR (MITRE v18)")
+    print("="*50)
+    
+    vendor_in = input("1. Enter Vendor/Product Name (e.g., 'Cisco Meraki', 'AWS'): ").strip()
+    
+    print("\n2. Select Asset Class (The abstraction).")
+    print("   Examples: [Firewall, Router, Switch, Identity Provider, Server, Container]")
+    asset_in = input("   Enter Asset Class: ").strip()
+    
+    # Step 3: Harvest
+    tool.harvest_community_rules(vendor_in)
+    
+    # Step 4: Run
+    tool.run_assessment(vendor_in, asset_in)

@@ -1,0 +1,91 @@
+### **1. Plan: The Simplified Mapping Logic**
+
+As an **EXPERT**, I will explain the "Chain of Logic" in simple terms.
+
+Think of this like a **Supply Chain**. You start with the "Target" (the Asset) and work backwards to find out "What tools (Logs) do we need to protect it?"
+
+In MITRE v18, this path is no longer theoretical—it is **hard-coded** into the database using specific "links" (relationships).
+
+---
+
+### **2. The Logic Chain (Simple Terms)**
+
+Here is the exact step-by-step flow you (or your app) must follow:
+
+#### **Step 1: The Target Check (Asset  Technique)**
+
+* **The Question:** "I bought a Firewall. What attacks break Firewalls?"
+* **The Logic:** You don't guess. You look for the **"Targets"** link.
+* **How it works:** Every Attack Technique (e.g., T1562) has a list of "Targets." If "Firewall" is on that list, this technique is now **In Scope**.
+* **Sub-techniques?** They work exactly the same. `T1562.001` (Disable Tools) specifically targets `Firewall`. `T1562.002` (Disable Driver) might target `Windows`. You treat them as separate line items.
+
+#### **Step 2: The Solution Check (Technique  Strategy)**
+
+* **The Question:** "Okay, T1562 attacks my Firewall. What is the plan to stop it?"
+* **The Logic:** You look for the **"Detects"** link.
+* **How it works:** A "Detection Strategy" is a generic plan (e.g., "Monitor for service deactivation"). It points to the Technique and says, *"I can catch this."*
+
+#### **Step 3: The Blueprint Check (Strategy  Analytic)**
+
+* **The Question:** "The plan is to 'monitor service deactivation.' What code do I write?"
+* **The Logic:** You look for the **"Implements"** reference.
+* **How it works:** An "Analytic" is the specific query logic. It references the Strategy ID, effectively saying: *"I am the code version of that abstract plan."*
+
+#### **Step 4: The Bill of Materials (Analytic  Data Component)**
+
+* **The Question:** "To run this code, what raw data (ingredients) do I need?"
+* **The Logic:** You look for the **"Uses"** reference.
+* **How it works:** The Analytic explicitly lists the "Data Components" (e.g., `Service: Creation`) required to make the code work.
+
+---
+
+### **3. Visualizing the Map**
+
+Here is the flow chart for your App Builder. The text on the arrows represents the **Relationship Type** they must query in the code.
+
+```mermaid
+graph LR
+    %% Nodes
+    Asset(Asset: Firewall)
+    Tech(Technique: T1562.001)
+    Strat(Strategy: DS0015)
+    Analytic(Analytic: AN-1234)
+    Data(Data Component: Service Logs)
+
+    %% Relationships (The Code Logic)
+    Tech -- "targets" --> Asset
+    Strat -- "detects" --> Tech
+    Analytic -- "ref: detection_strategy_refs" --> Strat
+    Analytic -- "ref: data_component_refs" --> Data
+
+    %% Styles
+    classDef asset fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;
+    classDef threat fill:#ffcdd2,stroke:#c62828,stroke-width:2px;
+    classDef logic fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef data fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
+
+    class Asset asset;
+    class Tech threat;
+    class Strat,Analytic logic;
+    class Data data;
+
+```
+
+---
+
+### **4. Technical Cheat Sheet (For the App Builder)**
+
+Give this table to your developer. It maps the "Simple Term" to the "Technical Field" they need to query in the STIX database.
+
+| Step | From Object | To Object | Relationship / Property Name | Direction |
+| --- | --- | --- | --- | --- |
+| **1** | **Technique** | **Asset** | Relationship Type: `targets` | `Source` (Tech)  `Target` (Asset) |
+| **2** | **Strategy** | **Technique** | Relationship Type: `detects` | `Source` (Strat)  `Target` (Tech) |
+| **3** | **Analytic** | **Strategy** | Property: `x_mitre_detection_strategy_refs` | List inside Analytic Object |
+| **4** | **Analytic** | **Data Component** | Property: `x_mitre_data_component_refs` | List inside Analytic Object |
+
+### **5. Important Note on Sub-Techniques**
+
+* **Do not roll them up automatically.**
+* In v18, `T1059` (Command Scripting) might target `Windows`, but `T1059.004` (Bash) specifically targets `Linux`.
+* Your app must check the `targets` relationship for **each sub-technique individually** to get an accurate threat model. If you only check the parent, you might miss granular Asset targeting.

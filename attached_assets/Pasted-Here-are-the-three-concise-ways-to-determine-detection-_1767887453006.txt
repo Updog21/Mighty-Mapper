@@ -1,0 +1,46 @@
+Here are the three concise ways to determine detection requirements starting **only** from a Technique ID (e.g., `T1059.001`).
+
+### **Method 1: The Official Graph Traversal (The "v18 Standard")**
+
+*Best for: Getting the complete picture (Strategy + Analytic + Log).*
+
+This method follows the official MITRE v18 links step-by-step.
+
+1. **Start:** Technique ID (`T1059.001`)
+2. **Find Strategy:** Query **"Detects"** relationship  Get `Detection Strategy` (Abstract Logic).
+3. **Find Analytic:** Query **"Implements"** reference  Get `Analytic` (Specific Logic/Code).
+4. **Find Data Component:** Query **"Uses"** reference inside Analytic  Get `Data Component` (The Log).
+
+### **Method 2: The Metadata Shortcut (The "Quick Look")**
+
+*Best for: Getting ONLY the Data Components (Logs) fast, skipping the logic.*
+
+MITRE keeps a direct list of "Data Sources" on the Technique object itself for backward compatibility.
+
+1. **Start:** Technique ID (`T1059.001`)
+2. **Read Property:** Look at the `x_mitre_data_sources` field on the Technique object.
+3. **Result:** Returns the list of `Data Components` directly.
+* *Note: You miss the "Strategy" and "Analytic" context with this method.*
+
+
+
+### **Method 3: The Community Lookup (The "Harvester")**
+
+*Best for: Finding ready-to-use rules (Sigma/Splunk) that MITRE might not list.*
+
+Use the ID as a "Tag Search" across external repositories.
+
+1. **Start:** Technique ID (`T1059.001`)
+2. **Search:** Scan local rule files (Sigma/Splunk/Elastic) for `tags: attack.t1059.001`.
+3. **Extract:** Read the `logsource` or `sourcetype` field from the matched files.
+4. **Result:** Returns the specific **Vendor Log** (e.g., `meraki_ids`) and the **Detection Rule** (Analytic).
+
+---
+
+### **Summary for Your App Builder**
+
+| Goal | Use Method | Logic Path |
+| --- | --- | --- |
+| **"Build a Full Report"** | **Method 1** | `ID`  `Strategy`  `Analytic`  `Component` |
+| **"Just tell me what to log"** | **Method 2** | `ID`  `Data Source Field` |
+| **"Give me the SIEM code"** | **Method 3** | `ID`  `External Repo Search` |

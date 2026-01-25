@@ -1,0 +1,74 @@
+### **Plan: The 3 Methods to Derive the Full Chain**
+
+As an **EXPERT**, I have identified exactly **three** distinct methods to generate the specific chain (`ID`  `Strategy`  `Analytic`  `Component`) starting from a Technique ID.
+
+You should provide these three options to your App Builder. They range from "Official/Rigid" to "Community/Flexible."
+
+---
+
+### **Method 1: The Official v18 Graph (The "Gold Standard")**
+
+*Use this for: Official MITRE compliance and "textbook" correctness.*
+
+This uses the MITRE Enterprise STIX data. It is the only method where "Strategy" and "Analytic" are formal, distinct database objects.
+
+* **Logic Path:**
+1. **Input:** Technique ID (e.g., `T1059`).
+2. **Find Strategy:** Query **Relationships** (`type=detects`) where `target_ref` is the Technique UUID.
+* *Result:* Returns `Detection Strategy` objects (e.g., `DS001`).
+
+
+3. **Find Analytic:** Query **Analytic Objects** for the property `x_mitre_detection_strategy_refs` containing the Strategy UUID.
+* *Result:* Returns `Analytic` objects (e.g., `AN001`).
+
+
+4. **Find Component:** Read the `x_mitre_data_component_refs` property inside the Analytic.
+* *Result:* Returns `Data Component` (e.g., `Process Creation`).
+
+
+
+
+
+### **Method 2: The "Parent Fallback" (The Inheritance Logic)**
+
+*Use this for: Filling gaps when a Sub-Technique (e.g., `T1059.001`) has no direct strategies defined.*
+
+MITRE often defines strategies at the "Parent" level (`T1059`) and expects them to apply to all children (`.001`, `.002`). Your app must implement this fallback or you will miss coverage.
+
+* **Logic Path:**
+1. **Input:** Sub-Technique ID (e.g., `T1059.001`).
+2. **Check Direct:** Try **Method 1**. If results = 0, proceed to step 3.
+3. **Find Parent:** Look up the `x_mitre_is_subtechnique` property. If True, find the Parent Technique UUID (`T1059`).
+4. **Inherit Strategy:** Perform **Method 1** using the **Parent UUID**.
+5. **Result:** You assume the Parent's Strategy/Analytic/Component chain applies to the Child.
+
+
+
+### **Method 3: The "CAR" Bridge (The Cyber Analytics Repository)**
+
+*Use this for: Specific, code-heavy analytics (Splunk/EQL) that MITRE separates from the core framework.*
+
+MITRE maintains a separate dataset called **CAR** (Cyber Analytics Repository). It maps Techniques directly to specific pseudo-code analytics, which have their own data models.
+
+* **Logic Path:**
+1. **Input:** Technique ID (e.g., `T1059`).
+2. **Find Analytic:** Query the **CAR Dataset** (separate JSON) for analytics where `coverage` contains `T1059`.
+3. **Derive Strategy:** The CAR Analytic **Title/Description** serves as the "Strategy."
+4. **Find Component:** Query the `implementations` field in the CAR object.
+5. **Result:** Returns the specific "Data Model" (e.g., `Sysmon Event 1`).
+
+
+
+---
+
+### **Summary Table for the App Builder**
+
+| Method Name | Source Data | Logic Complexity | Best Use Case |
+| --- | --- | --- | --- |
+| **1. Official v18** | `enterprise-attack.json` | **Medium** (Requires Graph Traversal) | The primary engine for your tool. |
+| **2. Parent Fallback** | `enterprise-attack.json` | **High** (Requires logic to check child  parent) | Handling "empty" sub-techniques that inherit logic. |
+| **3. CAR Bridge** | `car-data.json` | **Low** (Direct Key/Value Lookup) | Getting actual pseudo-code (Splunk/EQL) queries. |
+
+### **Next Step**
+
+Would you like me to generate the **JSON Schema** for the output of this logic? This would give your developer the exact format the app should produce (e.g., a JSON object with `technique_id`, `strategy_name`, `analytic_logic`, `data_component`).

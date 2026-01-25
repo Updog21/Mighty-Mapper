@@ -1,0 +1,30 @@
+{
+  "category_map": {
+    "process_creation": "Process Creation",
+    "process_access": "Process Access",
+    "process_termination": "Process Termination",
+    "image_load": "Module Load",
+    "driver_load": "Driver Load",
+    "file_event": "File Creation",
+    "file_change": "File Modification",
+    "file_delete": "File Deletion",
+    "file_rename": "File Modification",
+    "registry_add": "Windows Registry Key Creation",
+    "registry_delete": "Windows Registry Key Deletion",
+    "registry_event": "Windows Registry Key Modification",
+    "network_connection": "Network Connection Creation",
+    "dns_query": "Network Traffic Content",
+    "proxy": "Network Traffic Content",
+    "firewall": "Network Traffic Flow",
+    "authentication": "Logon Session Creation",
+    "ps_script": "Script Execution"
+  },
+  "product_map": {
+    "aws": "IaaS",
+    "azure": "Azure AD",
+    "gcp": "IaaS",
+    "windows": "Windows",
+    "linux": "Linux",
+    "macos": "macOS"
+  }
+}

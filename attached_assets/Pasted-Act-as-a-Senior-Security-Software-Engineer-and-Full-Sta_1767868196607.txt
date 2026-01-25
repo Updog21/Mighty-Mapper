@@ -1,0 +1,38 @@
+Act as a Senior Security Software Engineer and Full-Stack Developer. I want to build a self-hosted Threat-Informed Defense platform called "OpenTidal". This tool is an open-source alternative to Tidal Cyber.
+
+**Project Objective:**
+Create a web application that allows users to map security products (e.g., "CrowdStrike", "Splunk") to MITRE ATT&CK Techniques, visualize their coverage against specific Threat Groups (e.g., APT29), and use AI to infer coverage for unknown tools.
+
+**Tech Stack & Architecture:**
+1.  **Backend (The Brain):** Use the official MITRE ATT&CK Workbench REST API (Docker image: `ghcr.io/center-for-threat-informed-defense/attack-workbench-rest-api:latest`) backed by MongoDB. This will be the source of truth for all STIX data.
+2.  **Middleware (The Orchestrator):** Use n8n (Docker image: `n8nio/n8n:latest`) to handle data ingestion, web scraping, and AI processing.
+3.  **Frontend (The UI):** Build a modern, responsive React/Next.js dashboard (or use Streamlit if faster) that connects to the Workbench API and n8n Webhooks.
+4.  **Deployment:** A single `docker-compose.yml` file to spin up the entire stack.
+
+**Key Features to Implement:**
+
+1.  **The "Coverage Map" (Dashboard):**
+    * Fetch all MITRE ATT&CK Techniques from the Workbench API (`GET /api/techniques`).
+    * Display them in a matrix/heatmap format (similar to MITRE Navigator).
+    * Allow the user to select an "Adversary" (e.g., APT29) and highlight the techniques they use in RED.
+    * Allow the user to select their "Defensive Stack" (saved in Workbench) and highlight covered techniques in GREEN.
+    * Show the gap analysis (Red cells not covered by Green).
+
+2.  **The "AI Auto-Mapper" (Input Form):**
+    * Create a form where the user enters a "Product Name" (e.g., "Miro") and a "Documentation URL".
+    * On submit, send this data to an n8n Webhook (`POST /webhook/analyze-product`).
+    * (Note for context: The n8n workflow will scrape the URL, send it to OpenAI to map audit logs to MITRE Techniques, and push the result back to Workbench. You do not need to build the n8n workflow logic, just the connection to it).
+
+3.  **Data Ingestion Setup:**
+    * Ensure the `docker-compose.yml` includes the Workbench, MongoDB, and n8n services.
+    * Configure the Workbench to auto-initialize with MITRE ATT&CK v18 data.
+
+**Specific Constraints & Requirements:**
+* **STIX v2.1 Compliance:** The system must respect the MITRE v18 data model (using 'Assets' and 'Campaigns' where applicable).
+* **Docker Config:** Use `ghcr.io` for MITRE images to avoid Docker Hub 403 errors.
+* **UI Design:** Dark mode, dense data tables, professional "Cybersecurity Tool" aesthetic.
+
+**Output Required:**
+1.  The complete `docker-compose.yml` file.
+2.  The Frontend code (React components + API fetch logic).
+3.  A README explaining how to connect the n8n webhook to the UI.
