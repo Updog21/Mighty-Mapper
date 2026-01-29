@@ -1,94 +1,4 @@
-x-bw-api-env: &bw-api-env
-  # We use an anchor to avoid repeating the same settings for all services
-  API_WHITELIST_IP: "127.0.0.0/8 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
-
 services:
-  # --------------------------------------
-  # BunkerWeb Stack
-  # --------------------------------------
-  bunkerweb:
-    image: bunkerity/bunkerweb:1.6.0-beta
-    ports:
-      - 80:8080
-      - 443:8443
-      - "4443:8443/udp" # QUIC
-    environment:
-      <<: *bw-api-env
-      # General
-      AUTO_LETS_ENCRYPT: "yes"
-      USE_CLIENT_CACHE: "yes"
-      USE_GZIP: "yes"
-      DATABASE_URI: "sqlite:////data/db.sqlite3"
-      MULTISITE: "yes"
-
-      # Integration
-      DOCKER_CONNECTED: "yes"
-
-    networks:
-      - bw-universe
-      - default
-    volumes:
-      - bw-data:/data
-      - bw-cache:/var/cache/bunkerweb
-    labels:
-      - "bunkerweb.UI_HOST=http://bw-ui:7000"
-
-  bw-scheduler:
-    image: bunkerity/bunkerweb-scheduler:1.6.0-beta
-    depends_on:
-      - bunkerweb
-    user: "0:0"
-    environment:
-      <<: *bw-api-env
-      DATABASE_URI: "sqlite:////data/db.sqlite3"
-      DOCKER_CONNECTED: "yes"
-      BUNKERWEB_INSTANCES: "bunkerweb"
-      MULTISITE: "yes"
-    networks:
-      - bw-universe
-    volumes:
-      - bw-data:/data
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
-  bw-autoconf:
-    image: bunkerity/bunkerweb-autoconf:1.6.0-beta
-    depends_on:
-      - bunkerweb
-      - bw-scheduler
-    user: "0:0"
-    environment:
-      <<: *bw-api-env
-      DATABASE_URI: "sqlite:////data/db.sqlite3"
-      DOCKER_CONNECTED: "yes"
-      MULTISITE: "yes"
-    networks:
-      - bw-universe
-    volumes:
-      - bw-data:/data
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
-  bw-ui:
-    image: bunkerity/bunkerweb-ui:1.6.0-beta
-    ports:
-      - "7000:7000"
-    depends_on:
-      - bunkerweb
-    user: "0:989"
-    environment:
-      <<: *bw-api-env
-      DATABASE_URI: "sqlite:////data/db.sqlite3"
-      DOCKER_CONNECTED: "yes"
-      DOCKER_HOST: "unix:///var/run/docker.sock"
-      MULTISITE: "yes"
-    networks:
-      - bw-universe
-    volumes:
-      - bw-data:/data
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
-  # --------------------------------------
-  # Application Stack
-  # --------------------------------------
   app:
     build: .
     container_name: opentidal
@@ -100,23 +10,10 @@ services:
       - PORT=5000
       - DATABASE_URL=postgresql://opentidal:${POSTGRES_PASSWORD}@db:5432/opentidal
       - SESSION_SECRET=${SESSION_SECRET}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     depends_on:
       db:
         condition: service_healthy
-#    networks:
-#      - bw-universe
-#      - default
-    # BunkerWeb Configuration via Labels
-    labels:
-      - "bunkerweb.SERVER_NAME=opentidal.rivia.com.au"
-      - "bunkerweb.USE_REVERSE_PROXY=yes"
-      - "bunkerweb.REVERSE_PROXY_HOST=http://opentidal:5000"
-      - "bunkerweb.REVERSE_PROXY_INTERCEPT_ERRORS=no"
-      # Basic Auth
-      - "bunkerweb.USE_AUTH_BASIC=yes"
-      - "bunkerweb.AUTH_BASIC_USER=admin"
-      - "bunkerweb.AUTH_BASIC_PASSWORD=ei_7EeuDfwT!7yQu3eTxj@eZZybvTGUi"
-      - "bunkerweb.AUTH_BASIC_TEXT=Restricted Area"
 
   db:
     image: postgres:15-alpine
@@ -137,11 +34,7 @@ services:
       - default
 
 volumes:
-  bw-data:
-  bw-cache:
   postgres_data:
 
 networks:
-  bw-universe:
-    name: bw-universe
   default:

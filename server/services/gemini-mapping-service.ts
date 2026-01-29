@@ -1,6 +1,10 @@
 import { GoogleGenAI } from "@google/genai";
+import Ajv from "ajv/dist/2020";
+import addFormats from "ajv-formats";
 import { settingsService } from "./settings-service";
+import { buildGroundedConfig } from "./gemini-config";
 import { normalizePlatformList } from "../../shared/platforms";
+import decisionSchema from "../schemas/gemini-mapping-decision.schema.json";
 import { z } from "zod";
 
 export interface GeminiDataComponentCandidate {
@@ -34,6 +38,11 @@ export interface GeminiMappingDecision {
   reason?: string;
   evidence?: string;
   sourceUrl?: string;
+  confidence?: "high" | "medium" | "low";
+  scope?: "exact" | "suite-explicit" | "platform-explicit";
+  completeness?: "native" | "partial";
+  dataSource?: string;
+  notes?: string;
 }
 
 export interface GeminiKeyTestResult {
@@ -58,19 +67,32 @@ const sanitizeInput = (input: string): string => {
   return input.replace(/"""/g, '"').replace(/`/g, "'").trim();
 };
 
-const DecisionSchema = z.object({
-  id: z.string(),
-  selected: z.boolean().or(z.string().transform(v => v === 'true')).optional().default(false),
-  reason: z.string().optional(),
-  evidence: z.string().optional(),
-  source_url: z.string().optional().or(z.literal("")).transform(v => v || undefined),
-});
+type GeminiDecisionPayload = {
+  id: string;
+  selected: boolean;
+  confidence?: "high" | "medium" | "low";
+  scope?: "exact" | "suite-explicit" | "platform-explicit";
+  completeness?: "native" | "partial";
+  data_source?: string;
+  reason?: string;
+  evidence?: string;
+  source_url?: string;
+  notes?: string;
+};
+
+const ajv = new Ajv({ allErrors: true, strict: true });
+addFormats(ajv);
+const validateDecision = ajv.compile<GeminiDecisionPayload>(decisionSchema);
 
 const ResponseSchema = z.object({
-  decisions: z.array(DecisionSchema).optional().default([]),
+  decisions: z.array(z.unknown()).optional().default([]),
   selected_ids: z.array(z.string()).optional().default([]),
   notes: z.string().optional(),
-});
+  product: z.unknown().optional(),
+  summary: z.unknown().optional(),
+  gaps: z.unknown().optional(),
+  research_notes: z.string().optional(),
+}).passthrough();
 
 const readResponseText = async (response: any): Promise<string> => {
   if (!response) return "";
@@ -96,7 +118,20 @@ const extractJsonPayload = (text: string) => {
     const jsonString = text.slice(start, end + 1).trim();
     try {
       const raw = JSON.parse(jsonString);
-      return ResponseSchema.parse(raw);
+      const parsed = ResponseSchema.parse(raw);
+      const decisions = (parsed.decisions || [])
+        .map((entry) => {
+          if (!validateDecision(entry)) {
+            console.warn("Gemini mapping decision failed schema validation.", validateDecision.errors);
+            return null;
+          }
+          return entry as GeminiDecisionPayload;
+        })
+        .filter((entry): entry is GeminiDecisionPayload => Boolean(entry));
+      return {
+        ...parsed,
+        decisions,
+      };
     } catch (error) {
       console.warn("Gemini mapping JSON parse/validation failed.", error);
     }
@@ -133,18 +168,24 @@ const extractSources = (response: any): Map<string, { title?: string; url: strin
 };
 
 const normalizeDecision = (
-  entry: z.infer<typeof DecisionSchema>,
+  entry: GeminiDecisionPayload,
   candidateMap: Map<string, string>,
   allowedUrls: Set<string>,
   sourcesMap: Map<string, { title?: string; url: string }>
 ): GeminiMappingDecision | null => {
   const idRaw = entry.id;
   const id = idRaw.trim();
-  const canonicalId = id ? candidateMap.get(id.toLowerCase()) : undefined;
+  const normalizedId = id.replace(/^DC-?/i, "DC");
+  const canonicalId = normalizedId ? candidateMap.get(normalizedId.toLowerCase()) : undefined;
   if (!canonicalId) return null;
   const selected = entry.selected;
   const reason = entry.reason?.trim();
   const evidence = entry.evidence?.trim();
+  const confidence = entry.confidence?.trim() as GeminiMappingDecision["confidence"];
+  const scope = entry.scope?.trim() as GeminiMappingDecision["scope"];
+  const completeness = entry.completeness?.trim() as GeminiMappingDecision["completeness"];
+  const dataSource = entry.data_source?.trim();
+  const notes = entry.notes?.trim();
   const sourceUrlRaw = entry.source_url;
   let sourceUrl: string | undefined;
   if (sourceUrlRaw) {
@@ -160,6 +201,11 @@ const normalizeDecision = (
     reason,
     evidence,
     sourceUrl,
+    confidence,
+    scope,
+    completeness,
+    dataSource,
+    notes,
   };
 };
 
@@ -183,8 +229,10 @@ export class GeminiMappingService {
   }
 
   private buildPrompt(input: GeminiMappingInput): string {
-    const vendor = sanitizeInput(input.vendor || "Unknown");
-    const product = sanitizeInput(input.product || "Unknown");
+    const vendorValue = input.vendor?.trim() ? sanitizeInput(input.vendor) : "";
+    const productValue = input.product?.trim() ? sanitizeInput(input.product) : "";
+    const vendor = vendorValue || "Unknown";
+    const product = productValue || (vendorValue ? vendorValue : "Unknown");
     const aliasList = Array.isArray(input.aliases)
       ? Array.from(new Set(input.aliases.map((alias) => sanitizeInput(alias)).filter(Boolean)))
       : [];
@@ -222,36 +270,249 @@ export class GeminiMappingService {
       return [header, ...lines];
     });
 
+    const description = sanitizeInput(input.description || "Not provided");
+    const baseName = productValue
+      ? (vendorValue ? `${vendorValue} ${productValue}` : productValue)
+      : vendorValue;
+    const productSearchTokens = [baseName, ...aliasList]
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0 && value !== "Unknown");
+    const uniqueTokens = Array.from(new Set(productSearchTokens));
+    const productSearch = uniqueTokens.length > 0
+      ? uniqueTokens.map((value) => `"${value}"`).join(" OR ")
+      : vendor;
+    const toCategory = (platform: string): string => {
+      const value = platform.toLowerCase();
+      if (value.includes("windows")) return "WINDOWS";
+      if (value.includes("linux")) return "LINUX";
+      if (value.includes("network")) return "NETWORK";
+      if (value.includes("web")) return "WEB";
+      if ([
+        "saas",
+        "iaas",
+        "office 365",
+        "office suite",
+        "google workspace",
+        "identity provider",
+        "azure ad",
+        "aws",
+        "azure",
+        "gcp",
+      ].some((token) => value.includes(token))) {
+        return "CLOUD";
+      }
+      return "OTHER";
+    };
+    const platformTokens = Array.from(new Set(platformList.map((platform) => toCategory(platform))));
+    const normalizedPlatforms = platformTokens.length > 0 ? platformTokens.join(", ") : "OTHER";
+    const hasCloud = platformTokens.includes("CLOUD");
+    const hasHost = platformTokens.some((token) => ["WINDOWS", "LINUX", "OTHER"].includes(token));
+    let deploymentModel = "UNKNOWN";
+    if (hasCloud && hasHost) {
+      deploymentModel = "HYBRID";
+    } else if (hasCloud) {
+      deploymentModel = "CLOUD_SAAS";
+    } else if (hasHost) {
+      deploymentModel = "SELF_MANAGED";
+    }
+    const loggingCapabilities = "Not provided";
+    const evaluationDate = new Date().toISOString().slice(0, 10);
+
     return `
-You are mapping product telemetry to MITRE ATT&CK Data Components.
+You are a MITRE ATT&CK Data Component mapping analyst. Your task is to evaluate 
+whether a specific vendor product generates telemetry for MITRE ATT&CK Data Components.
 
-Product: """${vendor} ${product}"""
-Aliases: """${aliasList.length > 0 ? aliasList.join(", ") : "None provided"}"""
-Platforms: """${platforms}"""
+PRODUCT DEFINITION
+==================
+Vendor: """${vendor}"""
+Product Name: """${product}"""
+Product Search String: """${productSearch}"""
+Product Aliases: """${aliasList.length > 0 ? aliasList.join(", ") : "None provided"}"""
+Deployment Model: """${deploymentModel}"""
+Target Platforms: """${normalizedPlatforms}"""
+Primary Function: """${description}"""
+Key Logging Capabilities: """${loggingCapabilities}"""
 
-Select the Data Component IDs that this product or service likely generates logs for.
-Only choose IDs from the candidate list.
-Return JSON only in this shape:
+EVALUATION METHODOLOGY
+======================
+For each candidate Data Component (DC0001), determine whether the product 
+generates native telemetry for that specific behavior using this framework:
+
+1. EVIDENCE THRESHOLD:
+   - Vendor documentation must EXPLICITLY mention this product name or official alias
+   - Generic suite-level statements (e.g., "our platform logs X") do NOT qualify unless 
+     the specific product is named
+   - Feature documentation, API references, and logging guides are authoritative sources
+   - Marketing materials and general security whitepapers do NOT qualify as evidence
+   - Third-party testing or research does NOT replace vendor documentation
+
+2. SCOPE DETERMINATION:
+   - "exact": Vendor documentation explicitly states THIS PRODUCT logs this DC
+   - "suite-explicit": Vendor explicitly lists this product among modules that log this DC
+   - "platform-explicit": Vendor explicitly states platform-wide telemetry including this product
+   - Do NOT infer or extrapolate; document exactly what the vendor states
+
+3. CONFIDENCE LEVELS:
+   - "high": Multiple authoritative sources, explicit product name, clear feature description
+   - "medium": Single authoritative source, explicit product name, clear feature description
+   - "low": Explicit product name mentioned, but ambiguous or indirect evidence
+   - "unconfirmed": Cannot verify from vendor documentation; set selected=false
+
+4. PLATFORM/DEPLOYMENT FILTERING:
+   - If the product is Cloud SaaS only, and DC describes on-premises-specific behavior, 
+     default to false
+   - If the product is agent-based EDR and DC describes network-level telemetry the 
+     agent cannot capture, set false
+   - Exception: Only override if vendor documentation explicitly states cross-platform 
+     support
+   - Document the platform mismatch in "notes" field
+
+5. DATA COMPLETENESS vs. DATA AVAILABILITY:
+   - AVAILABLE: Product natively generates and logs this telemetry by default
+   - PARTIAL: Product can generate telemetry but requires:
+     * Configuration/enablement (feature flag, setting)
+     * Integration (3rd-party connector, plugin)
+     * Custom code (custom fields, scripting)
+   - MISSING: Product does not generate this telemetry regardless of configuration
+   - For PARTIAL: Set selected=true, but add "completeness": "partial" to JSON and 
+     explain in reason field
+
+6. LOGGING vs. DETECTION:
+   - Assess whether the product LOGS the activity, NOT whether it detects it
+   - Example: A SIEM detecting command execution (via external logs) is NOT the same 
+     as that SIEM generating native command execution logs
+   - Example: A proxy logging HTTP requests DOES generate network connection logs (DC0015)
+   - Be precise about data source origin
+
+RESEARCH PROCESS
+================
+For each Data Component candidate:
+
+  Step 1: Search vendor documentation explicitly mentioning this product
+          Query: ${productSearch} "<DC_DESCRIPTION>" logging events telemetry
+          
+  Step 2: If Step 1 yields results, extract the exact statement and source URL
+          
+  Step 3: If Step 1 is inconclusive, search for feature documentation or API reference
+          Query: ${productSearch} "<FEATURE_RELATED_TO_DC>" logs events
+          
+  Step 4: If Step 3 is inconclusive, search for deployment guides or configuration
+          Query: ${productSearch} logging configuration enable audit events
+          
+  Step 5: If Steps 1-4 yield no explicit match, set selected=false
+          Do NOT infer; do NOT extrapolate
+          
+  Step 6: For EACH selected=true result:
+          - Extract direct quote or paraphrase from vendor source
+          - Confirm product name is explicitly mentioned (not inferred)
+          - Verify source_url is from official vendor domain (not archived/cached)
+          - Assess confidence and scope
+          - Document completeness (native vs. partial/configured)
+
+EVALUATION OUTPUT
+=================
+Return ONLY valid JSON (no markdown fences, no code blocks, no explanatory text).
+
+JSON Structure:
 {
+  "product": {
+    "vendor": "${vendor}",
+    "name": "${product}",
+    "aliases": [${aliasList.map((alias) => `"${alias}"`).join(", ")}],
+    "deployment_model": "${deploymentModel}",
+    "platforms": [${platformTokens.map((platform) => `"${platform}"`).join(", ")}],
+    "evaluation_date": "${evaluationDate}"
+  },
+  "summary": {
+    "total_candidates": <NUMBER>,
+    "selected_count": <NUMBER>,
+    "coverage_percentage": <0-100>,
+    "coverage_level": "<STRONG|MODERATE|WEAK|NONE>"
+  },
   "decisions": [
-    { "id": "DC0001", "selected": true, "reason": "Short justification", "evidence": "Quote or paraphrase", "source_url": "https://..." },
-    { "id": "DC0002", "selected": false }
+    {
+      "id": "DC0001",
+      "data_source": "<PARENT_DATA_SOURCE>",
+      "selected": true,
+      "confidence": "high|medium|low",
+      "scope": "exact|suite-explicit|platform-explicit",
+      "completeness": "native|partial",
+      "reason": "Concise explanation of why this DC is applicable",
+      "evidence": "Direct quote or precise paraphrase from vendor documentation",
+      "source_url": "https://official-vendor-domain/exact-page",
+      "notes": "Additional context (configuration required, limitations, etc.)"
+    },
+    {
+      "id": "DC0002",
+      "data_source": "<PARENT_DATA_SOURCE>",
+      "selected": false
+    }
   ],
-  "notes": "optional short notes"
+  "gaps": [
+    {
+      "id": "DC0003",
+      "reason": "Why product does not provide this telemetry",
+      "impact": "High|Medium|Low",
+      "remediation": "Optional: how to close this gap (e.g., integration, configuration)"
+    }
+  ],
+  "research_notes": "Summary of evaluation methodology, data source limitations, caveats"
 }
-Rules:
-- Provide a decision entry for EVERY candidate ID listed below (include each ID exactly once).
-- If you are unsure if a product provides specific telemetry, set "selected": false.
-- Prefer higher-confidence matches over exhaustive coverage.
-- For selected entries, include a grounded reason, evidence, and a source_url from the search results.
-Work through each data source group in order and evaluate every ID before moving to the next group.
-Use Google Search grounding to confirm vendor documentation. Only select IDs if evidence indicates the product generates logs for that data component.
 
-Candidate groups (by data source):
+SELECTION RULES
+===============
+- Provide a decision entry for EVERY candidate ID (include each ID exactly once)
+- For selected=false: ONLY include "id" and "selected" fields (omit all others)
+- For selected=true: ALWAYS include confidence, scope, completeness, reason, evidence, source_url
+- Do NOT fabricate evidence, quotes, or URLs
+- If you cannot find an authoritative source: set selected=false
+- Evidence must mention this product explicitly (not inferred from suite/parent product)
+- Confidence levels:
+  * high: Multiple sources OR single authoritative + unambiguous statement
+  * medium: Single authoritative source + clear statement
+  * low: Explicit mention but indirect/ambiguous evidence
+- Scope levels:
+  * exact: "ProductName logs DC0001" or "ProductName generates <behavior>"
+  * suite-explicit: "Suite including ProductName logs DC0001"
+  * platform-explicit: "All ProductName instances across platforms log DC0001"
+- Completeness:
+  * native: Product logs this by default, no configuration required
+  * partial: Requires configuration, integration, or custom code
+- Gaps section: Include only CRITICAL gaps (high detection value, not currently provided)
+
+QUALITY GATES
+=============
+Before returning JSON:
+
+  [ ] Every candidate ID has exactly one decision entry
+  [ ] No selected=true entries lack confidence, scope, completeness, reason, evidence, source_url
+  [ ] Every source_url is from official vendor domain (e.g., docs.vendor.com, support.vendor.com)
+  [ ] Every evidence quote is directly traceable to source_url
+  [ ] No inferred or extrapolated statements in reason/evidence fields
+  [ ] Coverage percentages calculated correctly: (selected_count / total_candidates) x 100
+  [ ] Coverage level assigned correctly:
+      - STRONG: 70-100%
+      - MODERATE: 40-69%
+      - WEAK: 1-39%
+      - NONE: 0%
+  [ ] Platform/deployment filters applied (cross-platform exceptions documented)
+  [ ] Data completeness (native vs. partial) clearly indicated
+  [ ] Critical gaps identified and explained in gaps[] array
+
+CANDIDATE DATA COMPONENTS
+==========================
 ${groupSummaries.join("\n")}
 
-Candidates:
 ${candidateLines.join("\n")}
+
+INSTRUCTIONS
+============
+1. Work through each data source group in order
+2. For EACH candidate ID: research systematically using Steps 1-6 above
+3. Document all decisions in JSON structure above
+4. For each selected=true: Provide grounded evidence from official vendor source
+5. Return JSON ONLY; no markdown, no preamble, no explanation
+6. If research is incomplete, note in research_notes field and set confidence accordingly
 `.trim();
   }
 
@@ -280,9 +541,7 @@ ${candidateLines.join("\n")}
         const response = await client.models.generateContent({
           model: modelName,
           contents: prompt,
-          config: {
-            tools: [{ googleSearch: {} }],
-          } as any,
+          config: await buildGroundedConfig() as any,
         });
         const text = await readResponseText(response);
         const payload = extractJsonPayload(text);
@@ -375,9 +634,7 @@ ${candidateLines.join("\n")}
       const response = await client.models.generateContent({
         model: modelName,
         contents: "Use Google Search grounding. Respond with OK.",
-        config: {
-          tools: [{ googleSearch: {} }],
-        } as any,
+        config: await buildGroundedConfig() as any,
       });
       const usage = (response as any).usageMetadata || (response as any).response?.usageMetadata || {};
 

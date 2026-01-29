@@ -7,7 +7,7 @@ import { runAutoMapper, getMappingStatus, getAllProductMappings, RESOURCE_PRIORI
 import { slugifyPlatform } from "./auto-mapper/utils";
 import { mitreKnowledgeGraph } from "./mitre-stix";
 import { getChannelsForDCs } from "./mitre-stix/channel-aggregator";
-import { productService, adminService, getAllDetections, geminiMappingService, geminiResearchService, settingsService } from "./services";
+import { productService, adminService, getAllDetections, rebuildDetectionsIndex, geminiMappingService, geminiResearchService, settingsService } from "./services";
 import { getGlobalCoverage } from "./services/coverage-service";
 import { getCoverageGaps, getCoveragePaths } from "./services/gap-analysis-service";
 import { db } from "./db";
@@ -880,8 +880,10 @@ export async function registerRoutes(
 
   app.get("/api/detections", async (_req, res) => {
     try {
-      const key = buildCacheKey(["detections"]);
-      await respondWithCache(key, 5 * 60 * 1000, () => getAllDetections(), res);
+      const query = typeof _req.query.q === "string" ? _req.query.q : "";
+      const normalized = query.trim();
+      const key = buildCacheKey(["detections", normalized || "all"]);
+      await respondWithCache(key, 5 * 60 * 1000, () => getAllDetections(normalized), res);
     } catch (error) {
       console.error("Error fetching detections:", error);
       res.status(500).json({ error: "Failed to fetch detections" });
@@ -1121,6 +1123,10 @@ export async function registerRoutes(
         evaluatedCount: result.evaluatedCount,
         decisions: result.decisions,
         sources: result.sources,
+        debug: {
+          platforms: normalizedPlatforms,
+          candidateIds: candidates.map((candidate) => candidate.id),
+        },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1631,9 +1637,31 @@ export async function registerRoutes(
       const records = await db
         .select({ key: settings.key, value: settings.value, updatedAt: settings.updatedAt })
         .from(settings)
-        .where(inArray(settings.key, ["gemini_api_key", "gemini_model"]));
+        .where(inArray(settings.key, [
+          "gemini_api_key",
+          "gemini_model",
+          "gemini_temperature",
+          "gemini_top_p",
+          "gemini_top_k",
+          "gemini_seed",
+          "gemini_max_output_tokens",
+        ]));
 
       const recordMap = new Map(records.map((record) => [record.key, record]));
+      const resolveValue = (key: string, envKey: string, defaultValue?: string) => {
+        const record = recordMap.get(key);
+        if (record?.value) {
+          return { value: record.value, source: "database" as const };
+        }
+        const envValue = process.env[envKey];
+        if (envValue) {
+          return { value: envValue, source: "environment" as const };
+        }
+        if (defaultValue !== undefined) {
+          return { value: defaultValue, source: "default" as const };
+        }
+        return { value: null, source: "none" as const };
+      };
       const keyRecord = recordMap.get("gemini_api_key");
       const modelRecord = recordMap.get("gemini_model");
       const envKey = process.env.GEMINI_API_KEY;
@@ -1644,7 +1672,15 @@ export async function registerRoutes(
       const model = modelRecord?.value || envModel || "gemini-1.5-flash";
       const modelSource = modelRecord?.value ? "database" : envModel ? "environment" : "default";
 
-      res.json({ configured, source, updatedAt, model, modelSource });
+      const generation = {
+        temperature: resolveValue("gemini_temperature", "GEMINI_TEMPERATURE", "0.1"),
+        topP: resolveValue("gemini_top_p", "GEMINI_TOP_P", "1"),
+        topK: resolveValue("gemini_top_k", "GEMINI_TOP_K", "40"),
+        seed: resolveValue("gemini_seed", "GEMINI_SEED"),
+        maxOutputTokens: resolveValue("gemini_max_output_tokens", "GEMINI_MAX_OUTPUT_TOKENS"),
+      };
+
+      res.json({ configured, source, updatedAt, model, modelSource, generation });
     } catch (error) {
       console.error("Error fetching Gemini key status:", error);
       res.status(500).json({ error: "Failed to fetch Gemini key status" });
@@ -1655,14 +1691,45 @@ export async function registerRoutes(
     try {
       const apiKey = typeof req.body?.apiKey === "string" ? req.body.apiKey.trim() : "";
       const model = typeof req.body?.model === "string" ? req.body.model.trim() : "";
-      if (!apiKey && !model) {
-        return res.status(400).json({ error: "apiKey or model is required" });
+      const parseNumber = (value: unknown, field: string) => {
+        if (value === undefined || value === null) return undefined;
+        if (typeof value === "string" && value.trim().length === 0) return undefined;
+        const parsed = typeof value === "number" ? value : Number(String(value).trim());
+        if (!Number.isFinite(parsed)) {
+          throw new Error(`Invalid ${field} value`);
+        }
+        return String(parsed);
+      };
+
+      const temperature = parseNumber(req.body?.temperature, "temperature");
+      const topP = parseNumber(req.body?.topP, "topP");
+      const topK = parseNumber(req.body?.topK, "topK");
+      const seed = parseNumber(req.body?.seed, "seed");
+      const maxOutputTokens = parseNumber(req.body?.maxOutputTokens, "maxOutputTokens");
+
+      if (!apiKey && !model && !temperature && !topP && !topK && !seed && !maxOutputTokens) {
+        return res.status(400).json({ error: "Provide apiKey, model, or generation settings to update." });
       }
       if (apiKey) {
         await settingsService.set("gemini_api_key", apiKey);
       }
       if (model) {
         await settingsService.set("gemini_model", model);
+      }
+      if (temperature !== undefined) {
+        await settingsService.set("gemini_temperature", temperature);
+      }
+      if (topP !== undefined) {
+        await settingsService.set("gemini_top_p", topP);
+      }
+      if (topK !== undefined) {
+        await settingsService.set("gemini_top_k", topK);
+      }
+      if (seed !== undefined) {
+        await settingsService.set("gemini_seed", seed);
+      }
+      if (maxOutputTokens !== undefined) {
+        await settingsService.set("gemini_max_output_tokens", maxOutputTokens);
       }
       res.json({ status: "ok" });
     } catch (error) {
@@ -1734,6 +1801,19 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error refreshing CTID mappings:", error);
       res.status(500).json({ error: "Failed to refresh CTID mappings" });
+    }
+  });
+
+  app.post("/api/admin/maintenance/rebuild-detections-index", async (_req, res) => {
+    try {
+      const result = await rebuildDetectionsIndex();
+      res.json({
+        message: `Detection index rebuilt with ${result.indexed} entries.`,
+        ...result,
+      });
+    } catch (error) {
+      console.error("Error rebuilding detections index:", error);
+      res.status(500).json({ error: "Failed to rebuild detections index" });
     }
   });
 

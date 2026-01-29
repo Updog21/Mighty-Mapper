@@ -17,6 +17,16 @@ export interface DetectionRecord {
   sourceFile?: string;
 }
 
+type DetectionIndexEntry = DetectionRecord & {
+  content: string;
+};
+
+type DetectionIndex = {
+  version: number;
+  createdAt: string;
+  entries: DetectionIndexEntry[];
+};
+
 const SIGMA_RULE_PATHS = [
   'rules',
   'rules-emerging-threats',
@@ -24,25 +34,52 @@ const SIGMA_RULE_PATHS = [
   'rules-compliance'
 ];
 
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const INDEX_DIR = DATA_DIR;
+const INDEX_PATH = path.join(INDEX_DIR, 'detections-index.json');
+
 const BASE_PATHS = {
-  sigma: path.resolve(process.cwd(), 'data', 'sigma'),
-  splunk: path.resolve(process.cwd(), 'data', 'splunk-security-content'),
-  elastic: path.resolve(process.cwd(), 'data', 'elastic-detection-rules'),
-  azure: path.resolve(process.cwd(), 'data', 'azure-sentinel'),
+  sigma: path.join(DATA_DIR, 'sigma'),
+  splunk: path.join(DATA_DIR, 'splunk-security-content'),
+  elastic: path.join(DATA_DIR, 'elastic-detection-rules'),
+  azure: path.join(DATA_DIR, 'azure-sentinel'),
 };
 
-export async function getAllDetections(): Promise<DetectionRecord[]> {
+const INDEX_VERSION = 1;
+const INDEX_TTL_MS = Number(process.env.DETECTIONS_INDEX_TTL_MS || 10 * 60 * 1000);
+const SEARCH_MODE = (process.env.DETECTIONS_SEARCH_MODE || 'index').toLowerCase();
+
+let cachedIndex: DetectionIndex | null = null;
+let indexBuildPromise: Promise<DetectionIndex> | null = null;
+
+export async function getAllDetections(search?: string): Promise<DetectionRecord[]> {
+  const searchLower = typeof search === "string" ? search.trim().toLowerCase() : "";
+  if (SEARCH_MODE === 'index') {
+    const indexed = await getDetectionsFromIndex(searchLower);
+    if (indexed) return indexed;
+  }
+
   const [sigma, splunk, elastic, azure] = await Promise.all([
-    getSigmaDetections(),
-    getSplunkDetections(),
-    getElasticDetections(),
-    getAzureDetections(),
+    getSigmaDetections(searchLower, false),
+    getSplunkDetections(searchLower, false),
+    getElasticDetections(searchLower, false),
+    getAzureDetections(searchLower, false),
   ]);
 
   return [...sigma, ...splunk, ...elastic, ...azure];
 }
 
-async function getSigmaDetections(): Promise<DetectionRecord[]> {
+export async function rebuildDetectionsIndex(): Promise<{ indexed: number; createdAt: string }> {
+  const index = await buildDetectionsIndex();
+  return {
+    indexed: index.entries.length,
+    createdAt: index.createdAt,
+  };
+}
+
+async function getSigmaDetections(searchLower: string, includeContent: true): Promise<DetectionIndexEntry[]>;
+async function getSigmaDetections(searchLower: string, includeContent?: false): Promise<DetectionRecord[]>;
+async function getSigmaDetections(searchLower: string, includeContent = false): Promise<DetectionRecord[]> {
   try {
     const basePath = BASE_PATHS.sigma;
     const globPaths = SIGMA_RULE_PATHS.map(rulePath =>
@@ -53,6 +90,8 @@ async function getSigmaDetections(): Promise<DetectionRecord[]> {
 
     return readInBatches(files, async (filePath) => {
       const raw = await fs.readFile(filePath, 'utf-8');
+      const content = raw.toLowerCase();
+      if (searchLower && !content.includes(searchLower)) return null;
       const doc = yaml.load(raw) as Record<string, any> | undefined;
       if (!doc || (!doc.title && !doc.id)) return null;
 
@@ -60,21 +99,25 @@ async function getSigmaDetections(): Promise<DetectionRecord[]> {
       const techniqueIds = extractSigmaTechniqueIds(tags);
       const ruleId = doc.id || doc.title || path.basename(filePath, path.extname(filePath));
 
-      return {
+      const record: DetectionRecord = {
         id: `SIGMA-${ruleId}`,
         name: String(doc.title || doc.name || ruleId),
         description: typeof doc.description === 'string' ? doc.description : undefined,
         techniqueIds: techniqueIds.length > 0 ? techniqueIds : undefined,
         source: 'sigma',
         sourceFile: path.basename(filePath),
-      } satisfies DetectionRecord;
+      };
+
+      return includeContent ? { ...record, content } : record;
     });
   } catch {
     return [];
   }
 }
 
-async function getSplunkDetections(): Promise<DetectionRecord[]> {
+async function getSplunkDetections(searchLower: string, includeContent: true): Promise<DetectionIndexEntry[]>;
+async function getSplunkDetections(searchLower: string, includeContent?: false): Promise<DetectionRecord[]>;
+async function getSplunkDetections(searchLower: string, includeContent = false): Promise<DetectionRecord[]> {
   try {
     const basePath = BASE_PATHS.splunk;
     const files = await glob(path.join(basePath, 'detections', '**/*.yml'));
@@ -82,6 +125,8 @@ async function getSplunkDetections(): Promise<DetectionRecord[]> {
 
     return readInBatches(files, async (filePath) => {
       const raw = await fs.readFile(filePath, 'utf-8');
+      const content = raw.toLowerCase();
+      if (searchLower && !content.includes(searchLower)) return null;
       const doc = yaml.load(raw) as Record<string, any> | undefined;
       if (!doc || (!doc.name && !doc.id)) return null;
 
@@ -99,7 +144,7 @@ async function getSplunkDetections(): Promise<DetectionRecord[]> {
           ? (doc as any).how_to_impliment
           : undefined;
 
-      return {
+      const record: DetectionRecord = {
         id: `SPLUNK-${doc.id || doc.name}`,
         name: String(doc.name || doc.id),
         description: typeof doc.description === 'string' ? doc.description : undefined,
@@ -109,14 +154,18 @@ async function getSplunkDetections(): Promise<DetectionRecord[]> {
         howToImplement,
         source: 'splunk',
         sourceFile: path.basename(filePath),
-      } satisfies DetectionRecord;
+      };
+
+      return includeContent ? { ...record, content } : record;
     });
   } catch {
     return [];
   }
 }
 
-async function getElasticDetections(): Promise<DetectionRecord[]> {
+async function getElasticDetections(searchLower: string, includeContent: true): Promise<DetectionIndexEntry[]>;
+async function getElasticDetections(searchLower: string, includeContent?: false): Promise<DetectionRecord[]>;
+async function getElasticDetections(searchLower: string, includeContent = false): Promise<DetectionRecord[]> {
   try {
     const basePath = BASE_PATHS.elastic;
     const files = await glob(path.join(basePath, 'rules', '**/*.toml'));
@@ -124,6 +173,8 @@ async function getElasticDetections(): Promise<DetectionRecord[]> {
 
     return readInBatches(files, async (filePath) => {
       const toml = await fs.readFile(filePath, 'utf-8');
+      const content = toml.toLowerCase();
+      if (searchLower && !content.includes(searchLower)) return null;
       const ruleSection = extractSection(toml, 'rule');
       const ruleId = extractStringValue(toml, 'rule_id') || extractStringValue(ruleSection, 'rule_id');
       const name = extractStringValue(ruleSection, 'name') || extractStringValue(toml, 'name');
@@ -137,7 +188,7 @@ async function getElasticDetections(): Promise<DetectionRecord[]> {
       const techniqueIds = extractThreatIds(toml);
       const logSources = extractDataSourceTags(tags);
 
-      return {
+      const record: DetectionRecord = {
         id: `ELASTIC-${ruleId || name}`,
         name: String(name || ruleId),
         description: description || undefined,
@@ -147,14 +198,18 @@ async function getElasticDetections(): Promise<DetectionRecord[]> {
         howToImplement: setup || undefined,
         source: 'elastic',
         sourceFile: path.basename(filePath),
-      } satisfies DetectionRecord;
+      };
+
+      return includeContent ? { ...record, content } : record;
     });
   } catch {
     return [];
   }
 }
 
-async function getAzureDetections(): Promise<DetectionRecord[]> {
+async function getAzureDetections(searchLower: string, includeContent: true): Promise<DetectionIndexEntry[]>;
+async function getAzureDetections(searchLower: string, includeContent?: false): Promise<DetectionRecord[]>;
+async function getAzureDetections(searchLower: string, includeContent = false): Promise<DetectionRecord[]> {
   try {
     const basePath = BASE_PATHS.azure;
     const globPath = path.join(basePath, 'Solutions', '**', 'Analytic* Rules', '**/*.{yml,yaml}');
@@ -163,6 +218,8 @@ async function getAzureDetections(): Promise<DetectionRecord[]> {
 
     return readInBatches(files, async (filePath) => {
       const raw = await fs.readFile(filePath, 'utf-8');
+      const content = raw.toLowerCase();
+      if (searchLower && !content.includes(searchLower)) return null;
       const doc = yaml.load(raw) as Record<string, any> | undefined;
       if (!doc) return null;
 
@@ -176,7 +233,7 @@ async function getAzureDetections(): Promise<DetectionRecord[]> {
       const relevantTechniques = normalizeArray(doc.relevantTechniques);
       const columnNames = collectValues(doc, 'columnName');
 
-      return {
+      const record: DetectionRecord = {
         id: `AZURE-${ruleId}`,
         name: name || ruleId,
         description: typeof doc.description === 'string' ? doc.description : undefined,
@@ -186,12 +243,94 @@ async function getAzureDetections(): Promise<DetectionRecord[]> {
         source: 'azure',
         sourceFile: path.basename(filePath),
         howToImplement: undefined,
-      } satisfies DetectionRecord;
+      };
+
+      return includeContent ? { ...record, content } : record;
     });
   } catch {
     return [];
   }
 }
+
+const isIndexFresh = (index: DetectionIndex): boolean => {
+  if (index.version !== INDEX_VERSION) return false;
+  if (!index.createdAt) return false;
+  if (!Number.isFinite(INDEX_TTL_MS) || INDEX_TTL_MS <= 0) return true;
+  const ageMs = Date.now() - Date.parse(index.createdAt);
+  return Number.isFinite(ageMs) && ageMs < INDEX_TTL_MS;
+};
+
+const loadIndexFromDisk = async (): Promise<DetectionIndex | null> => {
+  try {
+    const raw = await fs.readFile(INDEX_PATH, 'utf-8');
+    const parsed = JSON.parse(raw) as DetectionIndex;
+    if (!parsed || !Array.isArray(parsed.entries)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+};
+
+const saveIndexToDisk = async (index: DetectionIndex): Promise<void> => {
+  await fs.mkdir(INDEX_DIR, { recursive: true });
+  await fs.writeFile(INDEX_PATH, JSON.stringify(index));
+};
+
+const buildDetectionsIndex = async (): Promise<DetectionIndex> => {
+  const [sigma, splunk, elastic, azure] = await Promise.all([
+    getSigmaDetections('', true),
+    getSplunkDetections('', true),
+    getElasticDetections('', true),
+    getAzureDetections('', true),
+  ]);
+
+  const entries = [...sigma, ...splunk, ...elastic, ...azure];
+  const index: DetectionIndex = {
+    version: INDEX_VERSION,
+    createdAt: new Date().toISOString(),
+    entries,
+  };
+
+  await saveIndexToDisk(index);
+  cachedIndex = index;
+  return index;
+};
+
+const getIndex = async (): Promise<DetectionIndex | null> => {
+  if (cachedIndex && isIndexFresh(cachedIndex)) return cachedIndex;
+  if (indexBuildPromise) return indexBuildPromise;
+
+  const disk = await loadIndexFromDisk();
+  if (disk && isIndexFresh(disk)) {
+    cachedIndex = disk;
+    return disk;
+  }
+
+  indexBuildPromise = buildDetectionsIndex().finally(() => {
+    indexBuildPromise = null;
+  });
+
+  try {
+    return await indexBuildPromise;
+  } catch (error) {
+    console.warn('Failed to build detections index:', error);
+    return null;
+  }
+};
+
+const getDetectionsFromIndex = async (searchLower: string): Promise<DetectionRecord[] | null> => {
+  try {
+    const index = await getIndex();
+    if (!index) return null;
+    const entries = searchLower
+      ? index.entries.filter((entry) => entry.content.includes(searchLower))
+      : index.entries;
+    return entries.map(({ content, ...record }) => record);
+  } catch (error) {
+    console.warn('Failed to load detections index:', error);
+    return null;
+  }
+};
 
 async function readInBatches<T>(
   files: string[],
@@ -263,7 +402,7 @@ function extractArrayValue(section: string | null, key: string): string[] | unde
   if (!section) return undefined;
   const arrayMatch = section.match(new RegExp(`${key}\\s*=\\s*\\[([\\s\\S]*?)\\]`));
   if (!arrayMatch) return undefined;
-  const values = Array.from(arrayMatch[1].matchAll(/"([^"]+)"|'([^']+)'/g))
+  const values = Array.from(arrayMatch[1].matchAll(/\"([^\"]+)\"|'([^']+)'/g))
     .map(match => (match[1] || match[2] || '').trim())
     .filter(Boolean);
   return values.length > 0 ? values : undefined;
@@ -273,14 +412,14 @@ function extractThreatIds(toml: string): string[] {
   const ids = new Set<string>();
   const threatBlocks = toml.split('[[rule.threat]]').slice(1);
   for (const block of threatBlocks) {
-    const idMatch = block.match(/^\s*id\s*=\s*"([^"]+)"/m);
+    const idMatch = block.match(/^\s*id\s*=\s*\"([^\"]+)\"/m);
     if (idMatch) ids.add(idMatch[1]);
   }
-  const techniqueRegex = /\[\[rule\.threat\.technique\]\]\s*[\s\S]*?\bid\s*=\s*"([^"]+)"/g;
+  const techniqueRegex = /\[\[rule\.threat\.technique\]\]\s*[\s\S]*?\bid\s*=\s*\"([^\"]+)\"/g;
   for (const match of toml.matchAll(techniqueRegex)) {
     ids.add(match[1]);
   }
-  const subtechniqueRegex = /\[\[rule\.threat\.technique\.subtechnique\]\]\s*[\s\S]*?\bid\s*=\s*"([^"]+)"/g;
+  const subtechniqueRegex = /\[\[rule\.threat\.technique\.subtechnique\]\]\s*[\s\S]*?\bid\s*=\s*\"([^\"]+)\"/g;
   for (const match of toml.matchAll(subtechniqueRegex)) {
     ids.add(match[1]);
   }

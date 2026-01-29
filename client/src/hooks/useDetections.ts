@@ -14,18 +14,21 @@ export interface Detection {
   sourceFile?: string;
 }
 
-async function fetchDetections(): Promise<Detection[]> {
-  const response = await fetch('/api/detections');
+async function fetchDetections(search?: string): Promise<Detection[]> {
+  const query = typeof search === 'string' && search.trim().length > 0
+    ? `?q=${encodeURIComponent(search.trim())}`
+    : '';
+  const response = await fetch(`/api/detections${query}`);
   if (!response.ok) {
     throw new Error('Failed to fetch detections');
   }
   return response.json();
 }
 
-export function useDetections() {
+export function useDetections(search?: string) {
   return useQuery({
-    queryKey: ['detections'],
-    queryFn: fetchDetections,
+    queryKey: ['detections', search?.trim().toLowerCase() || 'all'],
+    queryFn: () => fetchDetections(search),
     staleTime: 5 * 60 * 1000,
   });
 }

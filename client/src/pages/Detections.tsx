@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { Sidebar } from '@/components/Sidebar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -51,24 +51,227 @@ const getDetectionLanguage = (detection: Detection) => {
   return 'text';
 };
 
-const buildSearchableText = (detection: Detection) => {
-  return [
-    detection.name,
-    detection.description,
-    detection.howToImplement,
-    detection.query,
-    detection.sourceFile,
-    detection.id,
-    ...(detection.techniqueIds || []),
-    ...(detection.logSources || []),
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-};
+const LazyCodeBlock = memo(function LazyCodeBlock({
+  detection,
+}: {
+  detection: Detection;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [isVisible, setIsVisible] = useState(false);
+
+  useEffect(() => {
+    if (isVisible) return;
+    const node = containerRef.current;
+    if (!node) return;
+    if (!('IntersectionObserver' in window)) {
+      setIsVisible(true);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          setIsVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '200px' }
+    );
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [isVisible]);
+
+  if (!isVisible) {
+    return (
+      <div
+        ref={containerRef}
+        className="border border-border rounded-md bg-muted/40 p-3 text-xs text-muted-foreground"
+        style={{ minHeight: '6rem' }}
+      >
+        Loading detection preview...
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef}>
+      <SyntaxHighlighter
+        language={getDetectionLanguage(detection)}
+        style={oneLight}
+        customStyle={{
+          margin: 0,
+          background: 'hsl(var(--muted))',
+          fontSize: '0.75rem',
+          fontFamily: '"ProggyClean","ProggySquare","ProggyTiny",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+          color: 'hsl(var(--foreground))',
+          whiteSpace: 'pre-wrap',
+        }}
+        codeTagProps={{
+          style: {
+            fontFamily: '"ProggyClean","ProggySquare","ProggyTiny",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
+          },
+        }}
+        wrapLongLines
+        wrapLines
+        className="text-foreground border border-border rounded-md p-3"
+      >
+        {getCodeBlockContent(detection)}
+      </SyntaxHighlighter>
+    </div>
+  );
+});
+
+const DetectionsList = memo(function DetectionsList({
+  isLoading,
+  error,
+  filteredSources,
+  groupedDetections,
+  visibleCounts,
+  setVisibleCounts,
+  copiedId,
+  setCopiedId,
+}: {
+  isLoading: boolean;
+  error: unknown;
+  filteredSources: DetectionSource[];
+  groupedDetections: Map<DetectionSource, Detection[]>;
+  visibleCounts: Record<string, number>;
+  setVisibleCounts: Dispatch<SetStateAction<Record<string, number>>>;
+  copiedId: string | null;
+  setCopiedId: Dispatch<SetStateAction<string | null>>;
+}) {
+  if (isLoading) {
+    return (
+      <Card className="bg-card/50 backdrop-blur border-border">
+        <CardContent className="py-8 flex items-center gap-2 text-muted-foreground">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Loading detections...
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (error) {
+    return (
+      <Card className="bg-card/50 backdrop-blur border-border">
+        <CardContent className="py-8 text-sm text-red-400">
+          Failed to load detections.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (filteredSources.length === 0) {
+    return (
+      <Card className="bg-card/50 backdrop-blur border-border">
+        <CardContent className="py-10 text-center text-muted-foreground">
+          No detections available for the selected sources.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {filteredSources.map(source => {
+        const detections = groupedDetections.get(source) || [];
+        const visibleCount = visibleCounts[source] || 30;
+        const visibleDetections = detections.slice(0, visibleCount);
+        return (
+          <Card key={source} className="bg-card/50 backdrop-blur border-border">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Badge className={cn("text-xs", getSourceBadgeClass(source))}>
+                  {getSourceLabel(source)}
+                </Badge>
+                <span className="text-sm text-muted-foreground">
+                  Showing {Math.min(visibleCount, detections.length)} of {detections.length}
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                {visibleDetections.map(detection => {
+                  return (
+                    <div
+                      key={detection.id}
+                      className="border border-border rounded-lg bg-background p-4 space-y-3"
+                    >
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-base font-semibold text-foreground">{detection.name}</h3>
+                            {detection.techniqueIds && detection.techniqueIds.length > 0 && (
+                              <div className="flex flex-wrap gap-1">
+                                {detection.techniqueIds.map(tid => (
+                                  <Badge key={tid} className="text-xs font-mono bg-red-500/40 text-foreground border border-red-500/50">
+                                    {tid}
+                                  </Badge>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          {detection.description && (
+                            <p className="text-sm text-muted-foreground">{detection.description}</p>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="relative">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="absolute right-2 top-2 h-7 w-7"
+                          title={copiedId === detection.id ? 'Copied' : 'Copy'}
+                          onClick={async () => {
+                            const payload = getCodeBlockContent(detection);
+                            try {
+                              await navigator.clipboard.writeText(payload);
+                              setCopiedId(detection.id);
+                              setTimeout(() => setCopiedId(null), 1500);
+                            } catch {
+                              setCopiedId(null);
+                            }
+                          }}
+                        >
+                          {copiedId === detection.id ? (
+                            <Check className="w-4 h-4" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </Button>
+                        <LazyCodeBlock detection={detection} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              {visibleCount < detections.length && (
+                <div className="mt-4 flex justify-center">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setVisibleCounts((prev) => ({
+                        ...prev,
+                        [source]: Math.min(detections.length, visibleCount + 30),
+                      }))
+                    }
+                  >
+                    Load more
+                  </Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })}
+    </div>
+  );
+});
 
 export default function Detections() {
-  const { data, isLoading, error } = useDetections();
   const [sourceFilters, setSourceFilters] = useState<Set<DetectionSource>>(new Set());
   const [techniqueFilters, setTechniqueFilters] = useState<Set<string>>(new Set());
   const [isTechniquePanelOpen, setIsTechniquePanelOpen] = useState(false);
@@ -77,6 +280,7 @@ export default function Detections() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
   const [techniqueNames, setTechniqueNames] = useState<Record<string, string>>({});
+  const { data, isLoading, error } = useDetections(appliedSearch);
 
   const availableSources = useMemo(() => {
     const set = new Set<DetectionSource>();
@@ -94,21 +298,9 @@ export default function Detections() {
     }
   }, [availableSources.join('|')]);
 
-  const detectionsWithSearch = useMemo(() => {
-    const search = appliedSearch.trim();
-    if (!search) {
-      return (data || []).map(detection => ({ detection, searchable: '' }));
-    }
-    return (data || []).map(detection => ({
-      detection,
-      searchable: buildSearchableText(detection),
-    }));
-  }, [data, appliedSearch]);
-
   const groupedDetections = useMemo(() => {
     const groups = new Map<DetectionSource, Detection[]>();
-    const search = appliedSearch.trim().toLowerCase();
-    detectionsWithSearch.forEach(({ detection, searchable }) => {
+    (data || []).forEach((detection) => {
       const source = detection.source || 'ctid';
       if (!sourceFilters.has(source)) return;
       if (techniqueFilters.size > 0) {
@@ -116,17 +308,17 @@ export default function Detections() {
         const hasTechnique = detectionTechniques.some(tid => techniqueFilters.has(tid));
         if (!hasTechnique) return;
       }
-      if (search) {
-        if (!searchable.includes(search)) return;
-      }
       const existing = groups.get(source) || [];
       existing.push(detection);
       groups.set(source, existing);
     });
     return groups;
-  }, [detectionsWithSearch, sourceFilters, techniqueFilters, appliedSearch]);
+  }, [data, sourceFilters, techniqueFilters]);
 
-  const filteredSources = SOURCE_ORDER.filter(source => groupedDetections.has(source));
+  const filteredSources = useMemo(
+    () => SOURCE_ORDER.filter(source => groupedDetections.has(source)),
+    [groupedDetections]
+  );
   const totalDetections = data?.length || 0;
   const availableTechniques = useMemo(() => {
     const set = new Set<string>();
@@ -377,143 +569,16 @@ export default function Detections() {
               </CardContent>
             </Card>
 
-            {isLoading ? (
-              <Card className="bg-card/50 backdrop-blur border-border">
-                <CardContent className="py-8 flex items-center gap-2 text-muted-foreground">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Loading detections...
-                </CardContent>
-              </Card>
-            ) : error ? (
-              <Card className="bg-card/50 backdrop-blur border-border">
-                <CardContent className="py-8 text-sm text-red-400">
-                  Failed to load detections.
-                </CardContent>
-              </Card>
-            ) : filteredSources.length === 0 ? (
-              <Card className="bg-card/50 backdrop-blur border-border">
-                <CardContent className="py-10 text-center text-muted-foreground">
-                  No detections available for the selected sources.
-                </CardContent>
-              </Card>
-            ) : (
-              <div className="space-y-6">
-                {filteredSources.map(source => {
-                  const detections = groupedDetections.get(source) || [];
-                  const visibleCount = visibleCounts[source] || 30;
-                  const visibleDetections = detections.slice(0, visibleCount);
-                  return (
-                    <Card key={source} className="bg-card/50 backdrop-blur border-border">
-                      <CardHeader>
-                        <CardTitle className="flex items-center gap-2">
-                          <Badge className={cn("text-xs", getSourceBadgeClass(source))}>
-                            {getSourceLabel(source)}
-                          </Badge>
-                          <span className="text-sm text-muted-foreground">
-                            Showing {Math.min(visibleCount, detections.length)} of {detections.length}
-                          </span>
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <div className="space-y-4">
-                          {visibleDetections.map(detection => {
-                            return (
-                              <div
-                                key={detection.id}
-                                className="border border-border rounded-lg bg-background p-4 space-y-3"
-                              >
-                                <div className="flex items-start justify-between gap-4">
-                                  <div className="space-y-1">
-                                    <div className="flex flex-wrap items-center gap-2">
-                                      <h3 className="text-base font-semibold text-foreground">{detection.name}</h3>
-                                      {detection.techniqueIds && detection.techniqueIds.length > 0 && (
-                                        <div className="flex flex-wrap gap-1">
-                                          {detection.techniqueIds.map(tid => (
-                                            <Badge key={tid} className="text-xs font-mono bg-red-500/40 text-foreground border border-red-500/50">
-                                              {tid}
-                                            </Badge>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </div>
-                                    {detection.description && (
-                                      <p className="text-sm text-muted-foreground">{detection.description}</p>
-                                    )}
-                                  </div>
-                                </div>
-
-                                <div className="relative">
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="absolute right-2 top-2 h-7 w-7"
-                                    title={copiedId === detection.id ? 'Copied' : 'Copy'}
-                                    onClick={async () => {
-                                      const payload = getCodeBlockContent(detection);
-                                      try {
-                                        await navigator.clipboard.writeText(payload);
-                                        setCopiedId(detection.id);
-                                        setTimeout(() => setCopiedId(null), 1500);
-                                      } catch {
-                                        setCopiedId(null);
-                                      }
-                                    }}
-                                  >
-                                    {copiedId === detection.id ? (
-                                      <Check className="w-4 h-4" />
-                                    ) : (
-                                      <Copy className="w-4 h-4" />
-                                    )}
-                                  </Button>
-                                  <SyntaxHighlighter
-                                    language={getDetectionLanguage(detection)}
-                                    style={oneLight}
-                                    customStyle={{
-                                      margin: 0,
-                                      background: 'hsl(var(--muted))',
-                                      fontSize: '0.75rem',
-                                      fontFamily: '"ProggyClean","ProggySquare","ProggyTiny",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
-                                      color: 'hsl(var(--foreground))',
-                                      whiteSpace: 'pre-wrap',
-                                    }}
-                                    codeTagProps={{
-                                      style: {
-                                        fontFamily: '"ProggyClean","ProggySquare","ProggyTiny",ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace',
-                                      },
-                                    }}
-                                    wrapLongLines
-                                    wrapLines
-                                    className="text-foreground border border-border rounded-md p-3"
-                                  >
-                                    {getCodeBlockContent(detection)}
-                                  </SyntaxHighlighter>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                        {visibleCount < detections.length && (
-                          <div className="mt-4 flex justify-center">
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() =>
-                                setVisibleCounts((prev) => ({
-                                  ...prev,
-                                  [source]: Math.min(detections.length, visibleCount + 30),
-                                }))
-                              }
-                            >
-                              Load more
-                            </Button>
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  );
-                })}
-              </div>
-            )}
+            <DetectionsList
+              isLoading={isLoading}
+              error={error}
+              filteredSources={filteredSources}
+              groupedDetections={groupedDetections}
+              visibleCounts={visibleCounts}
+              setVisibleCounts={setVisibleCounts}
+              copiedId={copiedId}
+              setCopiedId={setCopiedId}
+            />
           </div>
         </div>
       </main>

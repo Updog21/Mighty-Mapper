@@ -22,7 +22,9 @@ import {
   Tag,
   Clock,
   Zap,
-  Key
+  Key,
+  Search,
+  SlidersHorizontal
 } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import {
@@ -52,6 +54,7 @@ export default function AdminTasks() {
   const [elasticSync, setElasticSync] = useState<TaskState>({ status: 'idle', message: '', progress: 0 });
   const [azureSync, setAzureSync] = useState<TaskState>({ status: 'idle', message: '', progress: 0 });
   const [ctidSync, setCtidSync] = useState<TaskState>({ status: 'idle', message: '', progress: 0 });
+  const [detectionsIndex, setDetectionsIndex] = useState<TaskState>({ status: 'idle', message: '', progress: 0 });
   const [stixInit, setStixInit] = useState<TaskState>({ status: 'idle', message: '', progress: 0 });
   const [dbPush, setDbPush] = useState<TaskState>({ status: 'idle', message: '', progress: 0 });
   const [dbSeed, setDbSeed] = useState<TaskState>({ status: 'idle', message: '', progress: 0 });
@@ -62,17 +65,31 @@ export default function AdminTasks() {
   const [aliasSaving, setAliasSaving] = useState<Record<number, boolean>>({});
   const [geminiKeyInput, setGeminiKeyInput] = useState('');
   const [geminiModelInput, setGeminiModelInput] = useState('');
+  const [geminiTemperatureInput, setGeminiTemperatureInput] = useState('');
+  const [geminiTopPInput, setGeminiTopPInput] = useState('');
+  const [geminiTopKInput, setGeminiTopKInput] = useState('');
+  const [geminiSeedInput, setGeminiSeedInput] = useState('');
+  const [geminiMaxTokensInput, setGeminiMaxTokensInput] = useState('');
   const [geminiStatus, setGeminiStatus] = useState<{
     configured: boolean;
     source: 'database' | 'environment' | 'none';
     updatedAt?: string | null;
     model?: string;
     modelSource?: 'database' | 'environment' | 'default';
+    generation?: {
+      temperature?: { value: string | null; source: 'database' | 'environment' | 'default' | 'none' };
+      topP?: { value: string | null; source: 'database' | 'environment' | 'default' | 'none' };
+      topK?: { value: string | null; source: 'database' | 'environment' | 'default' | 'none' };
+      seed?: { value: string | null; source: 'database' | 'environment' | 'default' | 'none' };
+      maxOutputTokens?: { value: string | null; source: 'database' | 'environment' | 'default' | 'none' };
+    };
   } | null>(null);
   const [geminiSaving, setGeminiSaving] = useState(false);
   const [geminiModelSaving, setGeminiModelSaving] = useState(false);
+  const [geminiConfigSaving, setGeminiConfigSaving] = useState(false);
   const [geminiTesting, setGeminiTesting] = useState(false);
   const [geminiMessage, setGeminiMessage] = useState<string | null>(null);
+  const [geminiConfigMessage, setGeminiConfigMessage] = useState<string | null>(null);
   const [geminiTestResult, setGeminiTestResult] = useState<{
     ok: boolean;
     model: string;
@@ -224,6 +241,29 @@ export default function AdminTasks() {
     }
   };
 
+  const runDetectionsIndexRebuild = async () => {
+    setDetectionsIndex({ status: 'running', message: 'Rebuilding detections index...', progress: 30 });
+
+    try {
+      const response = await fetch('/api/admin/maintenance/rebuild-detections-index', { method: 'POST' });
+      if (!response.ok) {
+        throw new Error('Failed to rebuild detections index');
+      }
+
+      const result = await response.json();
+      setDetectionsIndex({
+        status: 'success',
+        message: result.message || 'Detections index rebuilt successfully',
+        progress: 100
+      });
+
+      setTimeout(() => setDetectionsIndex({ status: 'idle', message: '', progress: 0 }), 3000);
+      refetchStatus();
+    } catch (error: any) {
+      setDetectionsIndex({ status: 'error', message: error.message || 'Failed to rebuild detections index', progress: 0 });
+    }
+  };
+
   const runDbSeed = async () => {
     setDbSeed({ status: 'running', message: 'This action requires CLI access. Run: npm run db:seed', progress: 0 });
 
@@ -298,6 +338,11 @@ export default function AdminTasks() {
       const data = await response.json();
       setGeminiStatus(data);
       setGeminiModelInput((current) => current || data.model || '');
+      setGeminiTemperatureInput((current) => current || data.generation?.temperature?.value || '');
+      setGeminiTopPInput((current) => current || data.generation?.topP?.value || '');
+      setGeminiTopKInput((current) => current || data.generation?.topK?.value || '');
+      setGeminiSeedInput((current) => current || data.generation?.seed?.value || '');
+      setGeminiMaxTokensInput((current) => current || data.generation?.maxOutputTokens?.value || '');
     } catch {
       setGeminiStatus(null);
     }
@@ -355,6 +400,41 @@ export default function AdminTasks() {
       setGeminiMessage(error.message || 'Failed to save Gemini model');
     } finally {
       setGeminiModelSaving(false);
+    }
+  };
+
+  const saveGeminiConfig = async () => {
+    setGeminiConfigSaving(true);
+    setGeminiConfigMessage(null);
+    try {
+      const payload: Record<string, string> = {};
+      if (geminiTemperatureInput.trim()) payload.temperature = geminiTemperatureInput.trim();
+      if (geminiTopPInput.trim()) payload.topP = geminiTopPInput.trim();
+      if (geminiTopKInput.trim()) payload.topK = geminiTopKInput.trim();
+      if (geminiSeedInput.trim()) payload.seed = geminiSeedInput.trim();
+      if (geminiMaxTokensInput.trim()) payload.maxOutputTokens = geminiMaxTokensInput.trim();
+
+      if (Object.keys(payload).length === 0) {
+        setGeminiConfigMessage('Enter at least one generation setting to save.');
+        setGeminiConfigSaving(false);
+        return;
+      }
+
+      const response = await fetch('/api/admin/ai-keys/gemini', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const payload = await response.json();
+        throw new Error(payload.error || 'Failed to save Gemini generation settings');
+      }
+      setGeminiConfigMessage('Gemini generation settings saved.');
+      await fetchGeminiStatus();
+    } catch (error: any) {
+      setGeminiConfigMessage(error.message || 'Failed to save Gemini generation settings');
+    } finally {
+      setGeminiConfigSaving(false);
     }
   };
 
@@ -622,6 +702,103 @@ export default function AdminTasks() {
                 </CardContent>
               </Card>
 
+              {/* Gemini Generation Settings */}
+              <Card className="bg-card/50 backdrop-blur border-border">
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="flex items-center gap-2">
+                      <SlidersHorizontal className="w-5 h-5 text-primary" />
+                      Gemini Generation Settings
+                    </CardTitle>
+                    <Badge variant="outline">Config</Badge>
+                  </div>
+                  <CardDescription>
+                    Control determinism and output length for grounded Gemini calls.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="text-sm text-muted-foreground">
+                    <p>Lower temperature and fixed seed improve repeatability, but grounded search can still vary.</p>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground">Temperature</div>
+                      <Input
+                        value={geminiTemperatureInput}
+                        onChange={(event) => setGeminiTemperatureInput(event.target.value)}
+                        placeholder="0.1"
+                        className="bg-background"
+                      />
+                      <div className="text-[10px] text-muted-foreground">
+                        Source: {geminiStatus?.generation?.temperature?.source || 'default'}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground">Top P</div>
+                      <Input
+                        value={geminiTopPInput}
+                        onChange={(event) => setGeminiTopPInput(event.target.value)}
+                        placeholder="1"
+                        className="bg-background"
+                      />
+                      <div className="text-[10px] text-muted-foreground">
+                        Source: {geminiStatus?.generation?.topP?.source || 'default'}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground">Top K</div>
+                      <Input
+                        value={geminiTopKInput}
+                        onChange={(event) => setGeminiTopKInput(event.target.value)}
+                        placeholder="40"
+                        className="bg-background"
+                      />
+                      <div className="text-[10px] text-muted-foreground">
+                        Source: {geminiStatus?.generation?.topK?.source || 'default'}
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-xs text-muted-foreground">Seed</div>
+                      <Input
+                        value={geminiSeedInput}
+                        onChange={(event) => setGeminiSeedInput(event.target.value)}
+                        placeholder="1234"
+                        className="bg-background"
+                      />
+                      <div className="text-[10px] text-muted-foreground">
+                        Source: {geminiStatus?.generation?.seed?.source || 'none'}
+                      </div>
+                    </div>
+                    <div className="space-y-1 sm:col-span-2">
+                      <div className="text-xs text-muted-foreground">Max Output Tokens</div>
+                      <Input
+                        value={geminiMaxTokensInput}
+                        onChange={(event) => setGeminiMaxTokensInput(event.target.value)}
+                        placeholder="1024"
+                        className="bg-background"
+                      />
+                      <div className="text-[10px] text-muted-foreground">
+                        Source: {geminiStatus?.generation?.maxOutputTokens?.source || 'none'}
+                      </div>
+                    </div>
+                  </div>
+
+                  <Button
+                    variant="secondary"
+                    onClick={saveGeminiConfig}
+                    disabled={geminiConfigSaving}
+                    className="w-full"
+                  >
+                    {geminiConfigSaving ? 'Saving...' : 'Save Generation Settings'}
+                  </Button>
+
+                  {geminiConfigMessage && (
+                    <div className="text-xs text-muted-foreground">{geminiConfigMessage}</div>
+                  )}
+                </CardContent>
+              </Card>
+
               {/* Sigma Sync */}
               <Card className="bg-card/50 backdrop-blur border-border">
                 <CardHeader>
@@ -871,6 +1048,57 @@ export default function AdminTasks() {
                       <>
                         <RefreshCw className="w-4 h-4 mr-2" />
                         Sync CTID Mappings
+                      </>
+                    )}
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {/* Detections Index */}
+              <Card className="bg-card/50 backdrop-blur border-border">
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="flex items-center gap-2">
+                      <Search className="w-5 h-5 text-primary" />
+                      Detections Search Index
+                    </CardTitle>
+                    {getStatusBadge(detectionsIndex.status)}
+                  </div>
+                  <CardDescription>
+                    Rebuild the on-disk search index used by the Detections page
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="text-sm text-muted-foreground">
+                    <p>Indexes local detection repositories so keyword searches are fast and full-file.</p>
+                  </div>
+
+                  {detectionsIndex.status !== 'idle' && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        {getStatusIcon(detectionsIndex.status)}
+                        <span className="text-sm">{detectionsIndex.message}</span>
+                      </div>
+                      {detectionsIndex.status === 'running' && (
+                        <Progress value={detectionsIndex.progress} className="h-2" />
+                      )}
+                    </div>
+                  )}
+
+                  <Button
+                    className="w-full"
+                    onClick={runDetectionsIndexRebuild}
+                    disabled={detectionsIndex.status === 'running'}
+                  >
+                    {detectionsIndex.status === 'running' ? (
+                      <>
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                        Rebuilding...
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Rebuild Index
                       </>
                     )}
                   </Button>

@@ -64,6 +64,7 @@ interface ResearchLogSource {
   evidence?: string;
   sourceUrl?: string;
   notes?: string;
+  verifiedByAi?: boolean;
 }
 
 interface ResearchResultEntry {
@@ -117,6 +118,13 @@ interface GeminiMappingDecision {
   reason?: string;
   evidence?: string;
   sourceUrl?: string;
+  confidence?: "high" | "medium" | "low";
+  scope?: "exact" | "suite-explicit" | "platform-explicit";
+}
+
+interface GeminiMappingDebug {
+  platforms?: string[];
+  candidateIds?: string[];
 }
 
 interface GeminiMappingResponse {
@@ -126,6 +134,7 @@ interface GeminiMappingResponse {
   candidateCount?: number;
   sources?: Array<{ title?: string; url: string }>;
   notes?: string;
+  debug?: GeminiMappingDebug;
 }
 
 interface CreatedProduct {
@@ -476,7 +485,11 @@ const normalizeEnrichmentResults = (raw: unknown): EnrichmentResult[] => {
             evidence: normalizeString(source?.evidence) || undefined,
             notes: normalizeString(source?.notes) || normalizeString(source?.note) || undefined,
             source_url: normalizeString(source?.source_url) || normalizeString(source?.sourceUrl) || undefined,
-            verified_by_ai: source?.verified_by_ai === true || source?.verifiedByAi === true || undefined,
+            verified_by_ai: source?.verified_by_ai === true || source?.verifiedByAi === true
+              ? true
+              : source?.verified_by_ai === false || source?.verifiedByAi === false
+                ? false
+                : undefined,
           };
         })
         .filter(Boolean) as EnrichmentLogSource[];
@@ -761,6 +774,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   const [geminiDecisionMap, setGeminiDecisionMap] = useState<Record<string, GeminiMappingDecision>>({});
   const [geminiSources, setGeminiSources] = useState<Array<{ title?: string; url: string }>>([]);
   const [geminiNotes, setGeminiNotes] = useState<string | null>(null);
+  const [geminiDebug, setGeminiDebug] = useState<GeminiMappingDebug | null>(null);
   const [geminiLoading, setGeminiLoading] = useState(false);
   const [researchLoading, setResearchLoading] = useState(false);
   const [researchResults, setResearchResults] = useState<ResearchEnrichmentResponse | null>(null);
@@ -1199,6 +1213,11 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               ? source.sourceUrl
               : typeof source?.source_url === 'string' ? source.source_url : undefined,
             notes: normalizeString(source?.notes) || undefined,
+            verifiedByAi: source?.verifiedByAi === true || source?.verified_by_ai === true
+              ? true
+              : source?.verifiedByAi === false || source?.verified_by_ai === false
+                ? false
+                : undefined,
           };
         }).filter((source: { name: string }) => source.name.trim().length > 0)
         : [];
@@ -1478,6 +1497,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       setGeminiDecisionMap({});
       setGeminiSources([]);
       setGeminiNotes(null);
+      setGeminiDebug(null);
       const response = await fetch('/api/ai/gemini/data-components', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1547,6 +1567,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       setGeminiDecisionMap(decisionMap);
       setGeminiSources(Array.isArray(mappingPayload.sources) ? mappingPayload.sources : []);
       setGeminiNotes(typeof mappingPayload.notes === 'string' ? mappingPayload.notes : null);
+      setGeminiDebug(mappingPayload.debug || null);
       toast({
         title: 'Gemini suggestions applied',
         description: `Selected ${suggestedIds.length} data components.`,
@@ -1659,7 +1680,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           evidence: source.evidence,
           notes: source.notes,
           source_url: source.sourceUrl,
-          verified_by_ai: true,
+          verified_by_ai: source.verifiedByAi === true ? true : source.verifiedByAi === false ? false : undefined,
         })),
       }));
       const platformSuggestions = (researchResults.platformSuggestions || []).map((entry) => ({
@@ -2286,6 +2307,14 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                       ))}
                     </div>
                   </div>
+                )}
+                {geminiDebug && (
+                  <details className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+                    <summary className="cursor-pointer text-foreground">Debug: candidate set</summary>
+                    <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] text-muted-foreground">
+                      {JSON.stringify(geminiDebug, null, 2)}
+                    </pre>
+                  </details>
                 )}
               </div>
             )}

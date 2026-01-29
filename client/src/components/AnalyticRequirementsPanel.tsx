@@ -70,6 +70,7 @@ export interface EnrichedLogSource {
   channel?: string[];
   notes?: string;
   sourceUrl?: string;
+  verifiedByAi?: boolean;
 }
 
 export interface EnrichedEvidence {
@@ -249,14 +250,21 @@ function RequirementCard({
                         </div>
                       )}
                       {source.sourceUrl && (
-                        <a
-                          href={source.sourceUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center rounded-md border border-border/60 bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
-                        >
-                          {source.sourceUrl}
-                        </a>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <a
+                            href={source.sourceUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center rounded-md border border-border/60 bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
+                          >
+                            {source.sourceUrl}
+                          </a>
+                          {source.verifiedByAi === false && (
+                            <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                              Unverified source
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
                   ))}
