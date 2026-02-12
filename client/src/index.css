@@ -133,7 +133,38 @@
   body {
     @apply font-sans antialiased bg-background text-foreground;
   }
+
+  /* Keep table columns uniform and allow long content to wrap cleanly. */
+  table {
+    table-layout: fixed;
+    width: 100%;
+  }
+
+  th,
+  td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }
+
+/* Borderless UI test: remove borders from boxes/panels globally, keep on inputs, buttons, tables, pills, code blocks */
+.borderless-ui :is(
+    .border,
+    .border-x,
+    .border-y,
+    .border-t,
+    .border-b,
+    .border-l,
+    .border-r,
+    .border-dashed,
+    .border-solid
+  ):not(.keep-border):not(table):not(thead):not(tbody):not(tfoot):not(tr):not(th):not(td):not(pre):not(code):not(input):not(textarea):not(select):not(button):not(fieldset) {
+  border-width: 0 !important;
+  border-style: none !important;
+  border-color: transparent !important;
+}
+
 
 ::-webkit-scrollbar {
   width: 8px;
@@ -151,4 +182,16 @@
 
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground));
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  html,
+  body {
+    height: auto !important;
+    overflow: visible !important;
+  }
 }

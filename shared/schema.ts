@@ -56,6 +56,16 @@ export const dataComponents = pgTable("data_components", {
   logSources: jsonb("log_sources").notNull().default('[]'),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+export const dataComponentPlatforms = pgTable("data_component_platforms", {
+  id: serial("id").primaryKey(),
+  dataComponentId: text("data_component_id").notNull(),
+  platform: text("platform").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => ({
+  platformIdx: index("data_component_platforms_platform_idx").on(table.platform),
+  dataComponentIdx: index("data_component_platforms_component_idx").on(table.dataComponentId),
+  uniquePlatformComponentIdx: uniqueIndex("data_component_platforms_unique_idx").on(table.platform, table.dataComponentId),
+}));
 export const detectionStrategies = pgTable("detection_strategies", {
   id: serial("id").primaryKey(),
   strategyId: text("strategy_id").notNull().unique(),
@@ -202,6 +212,10 @@ export const insertDataComponentSchema = createInsertSchema(dataComponents).omit
   id: true,
   createdAt: true,
 });
+export const insertDataComponentPlatformSchema = createInsertSchema(dataComponentPlatforms).omit({
+  id: true,
+  createdAt: true,
+});
 
 export const insertDetectionStrategySchema = createInsertSchema(detectionStrategies).omit({
   id: true,
@@ -236,6 +250,8 @@ export type Product = typeof products.$inferSelect;
 
 export type InsertDataComponent = z.infer<typeof insertDataComponentSchema>;
 export type DataComponent = typeof dataComponents.$inferSelect;
+export type InsertDataComponentPlatform = z.infer<typeof insertDataComponentPlatformSchema>;
+export type DataComponentPlatform = typeof dataComponentPlatforms.$inferSelect;
 
 export type InsertDetectionStrategy = z.infer<typeof insertDetectionStrategySchema>;
 export type DetectionStrategy = typeof detectionStrategies.$inferSelect;

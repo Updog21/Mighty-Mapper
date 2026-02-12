@@ -14,13 +14,14 @@ import {
   users,
   products,
   dataComponents,
+  dataComponentPlatforms,
   detectionStrategies,
   analytics,
   mitreAssets
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { db } from "./db";
-import { eq, like, or, sql } from "drizzle-orm";
+import { eq, inArray, like, or, sql } from "drizzle-orm";
 import { normalizePlatformList } from "../shared/platforms";
 
 export interface IStorage {
@@ -40,6 +41,9 @@ export interface IStorage {
   getDataComponentById(componentId: string): Promise<DataComponent | undefined>;
   createDataComponent(component: InsertDataComponent): Promise<DataComponent>;
   bulkCreateDataComponents(components: InsertDataComponent[]): Promise<void>;
+  getDataComponentsByComponentIds(componentIds: string[]): Promise<DataComponent[]>;
+  getDataComponentIdsForPlatforms(platforms: string[]): Promise<string[]>;
+  getDataComponentPlatformCount(): Promise<number>;
   
   // Detection Strategy operations
   getAllDetectionStrategies(): Promise<DetectionStrategy[]>;
@@ -138,6 +142,31 @@ export class PostgresStorage implements IStorage {
     if (components.length > 0) {
       await db.insert(dataComponents).values(components).onConflictDoNothing();
     }
+  }
+
+  async getDataComponentsByComponentIds(componentIds: string[]): Promise<DataComponent[]> {
+    if (!Array.isArray(componentIds) || componentIds.length === 0) return [];
+    return await db
+      .select()
+      .from(dataComponents)
+      .where(inArray(dataComponents.componentId, componentIds));
+  }
+
+  async getDataComponentIdsForPlatforms(platforms: string[]): Promise<string[]> {
+    const normalized = normalizePlatformList(platforms);
+    if (normalized.length === 0) return [];
+    const rows = await db
+      .select({ dataComponentId: dataComponentPlatforms.dataComponentId })
+      .from(dataComponentPlatforms)
+      .where(inArray(dataComponentPlatforms.platform, normalized));
+    return rows.map((row) => row.dataComponentId);
+  }
+
+  async getDataComponentPlatformCount(): Promise<number> {
+    const result = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(dataComponentPlatforms);
+    return Number(result[0]?.count || 0);
   }
 
   // Detection Strategy operations

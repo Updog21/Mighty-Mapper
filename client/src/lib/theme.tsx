@@ -26,6 +26,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     } else {
       root.classList.remove('dark');
     }
+    root.classList.add('borderless-ui');
     localStorage.setItem('theme', theme);
   }, [theme]);
 

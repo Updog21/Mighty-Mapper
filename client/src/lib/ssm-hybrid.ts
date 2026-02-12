@@ -16,8 +16,9 @@ export function getHybridStrategies(
   fallbackStrategies: DetectionStrategy[],
   targetPlatforms: string[]
 ): Strategy[] {
-  const baseStrategies = ssmCapabilities.length > 0 && stixStrategies && stixStrategies.length > 0
-    ? stixStrategies
+  const hasSsmCoverage = ssmCapabilities.length > 0;
+  const baseStrategies = hasSsmCoverage
+    ? (stixStrategies || [])
     : fallbackStrategies;
 
   const rawMetadataByTechnique = buildMetadataByTechnique(ssmCapabilities);
@@ -39,11 +40,11 @@ export function getHybridStrategies(
 
   const techniquesWithStrategies = new Set<string>();
   baseStrategies.forEach(strategy => {
-    (strategy.techniques || []).forEach(techId => techniquesWithStrategies.add(techId.toUpperCase()));
+    (strategy.techniques || []).forEach(techId => techniquesWithStrategies.add(normalizeTechniqueId(techId)));
   });
 
   const synthesizedStrategies: StixDetectionStrategy[] = Array.from(coveredTechniques)
-    .filter(techId => !techniquesWithStrategies.has(techId))
+    .filter(techId => !techniquesWithStrategies.has(normalizeTechniqueId(techId)))
     .map(techId => ({
       id: `SYNTH-${techId}`,
       name: `Detect ${techniqueNames.get(techId) || techId}`,
@@ -54,29 +55,35 @@ export function getHybridStrategies(
 
   const strategiesToRender = [...baseStrategies, ...synthesizedStrategies];
 
-  return strategiesToRender.map(strategy => {
-    const filteredAnalytics = strategy.analytics.filter((analytic: { platforms?: string[] }) =>
-      platformMatchesAny(analytic.platforms || [], targetPlatforms)
-    );
+  return strategiesToRender.map((strategy): Strategy => {
+    const strategyAnalytics = Array.isArray(strategy.analytics) ? strategy.analytics : [];
+    const filteredAnalytics = targetPlatforms.length > 0
+      ? strategyAnalytics.filter((analytic: any) =>
+          platformMatchesAny(analytic.platforms || [], targetPlatforms)
+        )
+      : strategyAnalytics;
+    const analyticsToRender = filteredAnalytics.length > 0 ? filteredAnalytics : strategyAnalytics;
 
-    if (filteredAnalytics.length > 0) {
+    // If platform filtering is too strict, fall back to strategy analytics instead of showing zero.
+    if (analyticsToRender.length > 0) {
       return {
         ...strategy,
-        analytics: filteredAnalytics,
-      };
+        analytics: analyticsToRender,
+      } as Strategy;
     }
 
     const strategyTechniques = strategy.techniques || [];
-    const hasEvidence = strategyTechniques.some(techId => coveredTechniques.has(techId.toUpperCase()));
+    const normalizedStrategyTechniques = strategyTechniques.map(normalizeTechniqueId);
+    const hasEvidence = normalizedStrategyTechniques.some(techId => coveredTechniques.has(techId));
 
     if (!hasEvidence) {
       return {
         ...strategy,
-        analytics: filteredAnalytics,
+        analytics: [],
       };
     }
 
-    const hasMetadata = strategyTechniques.some(techId => metadataByTechnique.has(techId.toUpperCase()));
+    const hasMetadata = normalizedStrategyTechniques.some(techId => metadataByTechnique.has(techId));
     const injectedAnalytic: StixAnalytic = {
       id: `custom-${strategy.id}`,
       name: 'Custom Detection Logic',

@@ -7,13 +7,18 @@ import { z } from "zod";
 export interface ResearchDataComponentCandidate {
   id: string;
   name: string;
+  description?: string;
   dataSourceName?: string;
   mutableElements?: string[];
+  logSourceHints?: Array<{ name: string; channel?: string }>;
 }
 
 export interface ResearchLogSource {
   name: string;
   channel?: string | string[];
+  requiredFields?: string[];
+  missingFields?: string[];
+  evidence?: string;
   notes?: string;
   sourceUrl?: string;
   verifiedByAi?: boolean;
@@ -47,12 +52,14 @@ export interface ResearchPlatformSuggestion {
   reason?: string;
   evidence?: string;
   sourceUrl?: string;
+  sourceUrlVerified?: boolean;
 }
 
 export interface PlatformCheckInput {
   vendor?: string;
   product?: string;
   description?: string;
+  aliases?: string[];
   platforms: string[];
 }
 
@@ -62,6 +69,7 @@ export interface PlatformValidationResult {
   reasoning?: string;
   evidence?: string;
   sourceUrl?: string;
+  sourceUrlVerified?: boolean;
 }
 
 export interface PlatformAlternativeResult {
@@ -69,10 +77,12 @@ export interface PlatformAlternativeResult {
   reason?: string;
   evidence?: string;
   sourceUrl?: string;
+  sourceUrlVerified?: boolean;
 }
 
 export interface PlatformCheckResult {
   model: string;
+  suggestedPlatforms?: string[];
   validation: PlatformValidationResult[];
   alternativePlatformsFound: PlatformAlternativeResult[];
   sources: Array<{ title?: string; url: string }>;
@@ -106,6 +116,9 @@ const sanitizeInput = (input: string): string => {
 const LogSourceSchema = z.object({
   name: z.string(),
   channel: z.union([z.string(), z.array(z.string())]).optional(),
+  required_fields: z.array(z.string()).optional(),
+  missing_fields: z.array(z.string()).optional(),
+  evidence: z.string().optional(),
   notes: z.string().optional(),
   source_url: z.string().optional(),
 });
@@ -145,6 +158,7 @@ const PlatformAlternativeSchema = z.object({
 });
 
 const PlatformCheckResponseSchema = z.object({
+  suggested_platforms: z.array(z.string()).optional().default([]),
   validation: z.array(PlatformValidationSchema).optional().default([]),
   alternative_platforms_found: z.array(PlatformAlternativeSchema).optional().default([]),
   note: z.string().optional(),
@@ -167,14 +181,63 @@ const readResponseText = async (response: any): Promise<string> => {
 
 const getResponseRoot = (response: any): any => response?.response ?? response;
 
-const extractJsonPayload = (text: string): { results?: ResearchResultEntry[]; note?: string } => {
+const extractSources = (response: any): Map<string, { title?: string; url: string }> => {
+  const sourcesMap = new Map<string, { title?: string; url: string }>();
+  const addSource = (url?: string, title?: string) => {
+    if (!url) return;
+    const normalized = normalizeUrl(url);
+    if (!normalized) return;
+    if (!sourcesMap.has(normalized)) {
+      sourcesMap.set(normalized, { title, url: normalized });
+    }
+  };
+
+  const root = getResponseRoot(response);
+  const candidate = root?.candidates?.[0];
+  const grounding = candidate?.groundingMetadata || candidate?.grounding_metadata;
+  const chunks = grounding?.groundingChunks || grounding?.grounding_chunks || [];
+  chunks.forEach((chunk: any) => addSource(chunk.web?.uri || chunk.web?.url, chunk.web?.title));
+
+  const citations = candidate?.citationMetadata?.citationSources
+    || candidate?.citation_metadata?.citation_sources
+    || [];
+  citations.forEach((citation: any) => addSource(citation.uri || citation.url));
+
+  return sourcesMap;
+};
+
+const resolveSourceReference = (
+  sourceUrlRaw: unknown,
+  allowedUrls: Set<string>,
+  sourcesMap: Map<string, { title?: string; url: string }>
+) => {
+  if (typeof sourceUrlRaw !== "string") {
+    return { sourceUrl: undefined, sourceUrlVerified: undefined as boolean | undefined };
+  }
+  const normalizedUrl = normalizeUrl(sourceUrlRaw);
+  if (!normalizedUrl) {
+    return { sourceUrl: undefined, sourceUrlVerified: undefined as boolean | undefined };
+  }
+  return {
+    sourceUrl: sourcesMap.get(normalizedUrl)?.url || normalizedUrl,
+    sourceUrlVerified: allowedUrls.has(normalizedUrl.toLowerCase()),
+  };
+};
+
+const extractJsonPayload = (text: string): Record<string, unknown> => {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start >= 0 && end > start) {
     const jsonString = text.slice(start, end + 1).trim();
     try {
       const raw = JSON.parse(jsonString);
-      return EnrichmentResponseSchema.parse(raw) as any;
+      const parsed = EnrichmentResponseSchema.safeParse(raw);
+      if (parsed.success) {
+        return parsed.data as unknown as Record<string, unknown>;
+      }
+      // Keep raw payload as a permissive fallback so partially valid responses
+      // still produce enrichment results instead of collapsing to an empty set.
+      return (raw && typeof raw === "object") ? raw : {};
     } catch (error) {
       console.warn("Research JSON parse/validation failed.", error);
     }
@@ -190,13 +253,67 @@ const extractPlatformCheckPayload = (text: string) => {
     const jsonString = text.slice(start, end + 1).trim();
     try {
       const raw = JSON.parse(jsonString);
-      return PlatformCheckResponseSchema.parse(raw);
+      const parsed = PlatformCheckResponseSchema.safeParse(raw);
+      if (parsed.success) {
+        return parsed.data;
+      }
+      return (raw && typeof raw === "object")
+        ? raw as Record<string, unknown>
+        : { suggested_platforms: [], validation: [], alternative_platforms_found: [] };
     } catch (error) {
       console.warn("Platform check JSON parse/validation failed.", error);
     }
   }
-  return { validation: [], alternative_platforms_found: [] };
+  return { suggested_platforms: [], validation: [], alternative_platforms_found: [] };
 };
+
+const containsAny = (value: string, needles: string[]) => {
+  const normalized = value.toLowerCase();
+  return needles.some((needle) => normalized.includes(needle));
+};
+
+const IAAS_POSITIVE_SIGNALS = [
+  "self-host",
+  "self host",
+  "self-managed",
+  "self managed",
+  "customer-managed",
+  "customer managed",
+  "customer account",
+  "your aws account",
+  "your azure subscription",
+  "your gcp project",
+  "bring your own cloud",
+  "byoc",
+  "deploy",
+  "deployed",
+  "installation",
+  "helm",
+  "kubernetes",
+  "terraform",
+  "cloudformation",
+  "vm",
+  "virtual machine",
+  "ec2",
+  "compute engine",
+  "azure vm",
+];
+
+const IAAS_NEGATIVE_SIGNALS = [
+  "saas",
+  "vendor-hosted",
+  "vendor hosted",
+  "hosted by",
+  "runs on aws",
+  "runs on azure",
+  "runs on gcp",
+  "built on aws",
+  "hosted on aws",
+  "hosted on azure",
+  "hosted on gcp",
+  "managed service",
+  "no deployment required",
+];
 
 export class GeminiResearchService {
   private client: GoogleGenAI | null = null;
@@ -215,6 +332,59 @@ export class GeminiResearchService {
     this.clientKey = apiKey;
     this.modelName = modelName;
     return { client: this.client, modelName };
+  }
+
+  private async generateWithGroundingFallback(client: GoogleGenAI, modelName: string, prompt: string) {
+    const groundedConfig = await buildGroundedConfig() as any;
+    const run = async (config: any) => (
+      client.models.generateContent({
+        model: modelName,
+        contents: prompt,
+        config,
+      })
+    );
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const isRetryableTransportError = (message: string) => (
+      /fetch failed|network|timeout|timed out|econnreset|enetunreach|eai_again|enotfound/i.test(message)
+    );
+    const isGroundingToolError = (message: string) => (
+      /search|grounding|retrieval|tool/i.test(message)
+    );
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const response = await run(groundedConfig);
+        return { response, fallbackNote: undefined as string | undefined };
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isRetryableTransportError(message)) {
+          break;
+        }
+        if (attempt < 2) {
+          await sleep(250 * attempt);
+        }
+      }
+    }
+
+    const fallbackConfig = { ...(groundedConfig || {}) };
+    delete fallbackConfig.tools;
+
+    try {
+      const response = await run(fallbackConfig);
+      return {
+        response,
+        fallbackNote: "Grounded web research was unavailable; result generated without Google Search grounding.",
+      };
+    } catch (fallbackError) {
+      const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      const lastMessage = lastError instanceof Error ? lastError.message : String(lastError || "");
+      if (isGroundingToolError(lastMessage) || isRetryableTransportError(lastMessage) || isRetryableTransportError(fallbackMessage)) {
+        throw new Error(`Grounded and fallback Gemini requests failed: ${lastMessage || fallbackMessage}`);
+      }
+      throw fallbackError;
+    }
   }
 
   private buildPrompt(input: ResearchEnrichmentInput): string {
@@ -271,9 +441,36 @@ export class GeminiResearchService {
     const productSearch = uniqueTokens.length > 0
       ? uniqueTokens.map((value) => `"${value}"`).join(" OR ")
       : vendor;
-    const candidateLines = input.dataComponents.map((candidate) => (
-      `- ${candidate.id} | ${candidate.name}`
-    ));
+    const candidateLines = input.dataComponents.map((candidate) => {
+      const description = candidate.description?.trim();
+      const dataSource = candidate.dataSourceName?.trim();
+      const mutableElements = Array.isArray(candidate.mutableElements)
+        ? candidate.mutableElements.filter((value) => value && value.trim().length > 0)
+        : [];
+      const logSourceHints = Array.isArray(candidate.logSourceHints)
+        ? candidate.logSourceHints.filter((hint) => hint.name && hint.name.trim().length > 0)
+        : [];
+      const logSourceText = logSourceHints.length > 0
+        ? logSourceHints
+          .slice(0, 6)
+          .map((hint) => {
+            const channel = typeof hint.channel === "string" ? hint.channel.trim() : "";
+            return channel ? `${hint.name} (${channel})` : hint.name;
+          })
+          .join("; ")
+        : "";
+      const fieldText = mutableElements.length > 0
+        ? mutableElements.slice(0, 8).join(", ")
+        : "";
+
+      return [
+        `- ${candidate.id} | ${candidate.name}`,
+        description ? `  Description: ${description}` : null,
+        dataSource ? `  Data Source: ${dataSource}` : null,
+        fieldText ? `  Known fields: ${fieldText}` : null,
+        logSourceText ? `  Log source hints (MITRE log source table): ${logSourceText}` : null,
+      ].filter(Boolean).join("\n");
+    });
 
     return `
 You are a detection engineer conducting systematic research to identify product-native
@@ -307,7 +504,8 @@ For EACH Data Component provided, follow this systematic 12-step process:
 STEP 1: UNDERSTAND THE MITRE DATA COMPONENT
 --------------------------------------------------------------------------------
 ACTION:
-  1a. Read the Data Component definition from MITRE
+  1a. Use the provided Data Component description (if present)
+      - If missing, read the Data Component definition from MITRE
       URL: attack.mitre.org/datacomponents/[DC_ID]/
   1b. Understand what operational activity is being described
   1c. Note which MITRE techniques use this DC
@@ -371,6 +569,11 @@ ACTION:
       - NATIVE: Part of product by default
       - EXPORT: Vendor-supported export mechanism
       - THIRD_PARTY: Not native (exclude)
+  3d. Use the provided log source hints (if any) as starting points,
+      but validate them against authoritative docs.
+  3e. Treat MITRE log source hints as EXAMPLES/ARCHETYPES, not exact-name requirements.
+      - Do NOT require lexical name equality with MITRE hints.
+      - Accept vendor-specific equivalents when telemetry semantics and fields align.
 
 EXAMPLE (ServiceNow ECC Queue + DC-0037):
   Candidates (NATIVE):
@@ -390,13 +593,16 @@ GATE:
   FAIL: If no candidates exist, return empty log_sources list
 
 
-STEP 4: RESEARCH VENDOR DOCUMENTATION FOR EACH CANDIDATE
+STEP 4: RESEARCH AUTHORITATIVE DOCUMENTATION FOR EACH CANDIDATE
 --------------------------------------------------------------------------------
 ACTION:
-  4a. For each candidate source, search vendor-owned documentation:
-      - Vendor domain: registrable domain must contain vendor name before TLD
-        OK: docs.vendor.com, vendor.com/docs, vendor.io
-        NO: product-docs.thirdparty.com, github.com/vendor (not owned)
+  4a. For each candidate source, search authoritative documentation:
+      - Prefer vendor-owned docs for the product (docs.vendor.com, vendor.com/docs)
+      - If the product logs to a platform-native dataset (e.g., Microsoft/AWS/GCP),
+        platform-owner docs are acceptable for the log channel/fields
+      - Third-party blogs/community writeups may be used as supporting evidence when
+        official docs are incomplete, but mark this clearly in notes
+      - Never rely on SIEM setup guides as primary proof of product-native telemetry
   4b. Search for:
       - Table/object definitions (schema)
       - Field reference documentation
@@ -428,14 +634,14 @@ EXAMPLE (ServiceNow ECC Queue):
   Enablement: Requires explicit configuration (not default)
 
 GATE:
-  PASS: Can you cite vendor documentation for each candidate?
-  FAIL: If no vendor documentation found, remove candidate from next steps
+  PASS: Can you cite authoritative documentation for each candidate?
+  FAIL: If no authoritative documentation found, remove candidate from next steps
 
 
 STEP 5: IDENTIFY FIELDS RELEVANT TO THE DATA COMPONENT
 --------------------------------------------------------------------------------
 ACTION:
-  5a. For each vendor-documented candidate source:
+  5a. For each authoritative-documented candidate source:
   5b. Ask: "Which fields in this source contain DC-relevant telemetry?"
   5c. Map abstract DC concept to concrete field names
   5d. Document:
@@ -443,6 +649,9 @@ ACTION:
       - Data type (timestamp, string, number, boolean, etc.)
       - Example value
       - Field constraints (max length, encoding, truncation risk)
+  5e. IMPORTANT: You are responsible for mapping DCs based on field semantics.
+      Explicit vendor statements mapping a DC are NOT required if the fields
+      clearly satisfy the DC definition.
 
 EXAMPLE (DC-0037 + ecc_queue table):
   Fields relevant to DC-0037 (Application Log Content):
@@ -529,10 +738,14 @@ ACTION:
         - Example: "REST_API:/api/now/table/ecc_queue", "SYSLOG:local0"
         - Source: Vendor export/integration docs
 
-  7d. Special case: NO TECHNICAL IDENTIFIER
-      - If vendor docs describe logging but don't define a channel/identifier
-      - Set channel to ["NULL"]
-      - Explain in notes: "Channel not technically defined; requires vendor clarification"
+	  7d. Special case: NO TECHNICAL IDENTIFIER
+	      - If vendor docs describe logging but don't define a channel/identifier
+	      - Set channel to ["NULL"]
+	      - Explain in notes: "Channel not technically defined; requires vendor clarification"
+  7e. Equivalent-source rule:
+      - If a vendor source is functionally equivalent to a MITRE hint, keep the vendor name/channel.
+      - Do not rename vendor telemetry to MITRE labels.
+      - Capture equivalence in notes (for example: "Vendor source X is equivalent to MITRE-style auth sign-in telemetry").
 
 EXAMPLE (ServiceNow ECC Queue):
   Log source: ecc_queue table
@@ -664,7 +877,7 @@ STEP 12: FINAL VALIDATION AND CONFIDENCE ASSESSMENT
 ACTION:
   12a. For each log source identified:
   12b. Validate against criteria:
-       - Vendor documentation explicitly mentions this product name (not inferred)
+       - Documentation ties the log source to the product or its platform/module
        - Log source name verified from official docs
        - Channel identifier is concrete/technical (not generic label)
        - At least 2 fields support the DC
@@ -680,7 +893,7 @@ ACTION:
 
 EXAMPLE VALIDATION:
   Log source: ecc_queue
-  OK Vendor docs explicitly name this product: ServiceNow ECC Queue
+  OK Documentation describes ECC Queue as a core ServiceNow log source
   OK Log source name verified: Table name "ecc_queue" in ServiceNow docs
   OK Channel is technical: "ecc_queue" (not "Integration Messages")
   OK Fields support DC-0037: created, state, payload, topic, agent
@@ -715,15 +928,27 @@ FOR EACH DATA COMPONENT, return one results[] entry with:
           - "/api/now/table/[table_name]" (REST API endpoint)
           - "SignInLogs" (Azure dataset)
 
-      "channel": (array of strings) Concrete technical identifier(s)
+	      "channel": (array of strings) Concrete technical identifier(s)
         EXAMPLES:
           - ["ecc_queue"] (database table name)
           - ["rest_api:/api/now/table/ecc_queue"] (API endpoint)
           - ["syslog:local0"] (syslog facility)
           - ["Security:4624", "Security:4625"] (multiple Windows Event IDs)
           - ["authpriv.*", "/var/log/auth.log"] (syslog + file path)
-          - ["SignInLogs", "AuditLogs"] (multiple Azure datasets)
-          - ["NULL"] (only if channel not technically defined in docs)
+	          - ["SignInLogs", "AuditLogs"] (multiple Azure datasets)
+	          - ["NULL"] (only if channel not technically defined in docs)
+
+	      "required_fields": (array of strings, optional but recommended)
+	        - Fields from the product log source that map to the DC's mutable/expected fields
+	        - This is a fidelity/maturity signal, NOT a pass/fail gate
+
+	      "missing_fields": (array of strings, optional)
+	        - Expected/mutable fields that are not present or not documented for this source
+	        - Use to indicate partial maturity/fidelity, not to reject otherwise valid evidence
+
+	      "evidence": (string, optional)
+	        - Short field-level mapping justification (1-2 sentences)
+	        - Example: "payload, state, and created map to command content + execution status + timestamp."
 
       "notes": (string) Mapping explanation + enablement/configuration note (if applicable)
         TEMPLATE:
@@ -731,19 +956,21 @@ FOR EACH DATA COMPONENT, return one results[] entry with:
           [Enablement note if not default: 'Requires explicit configuration to enable.']
           [Limitations if relevant: 'Field [X] truncated at [N] characters.']"
 
-      "source_url": (string) URL to vendor-owned documentation that substantiates
-                             the log source name and/or channel
+      "source_url": (string) URL that substantiates the log source name and/or channel
+                             (prefer authoritative vendor/platform docs; community sources allowed as fallback)
         EXAMPLES:
           - https://docs.servicenow.com/...
           - https://docs.microsoft.com/en-us/...
           - https://docs.aws.amazon.com/...
           - https://cloud.google.com/logging/...
 
-        NOT ACCEPTABLE:
-          - Third-party blogs or tutorials
-          - GitHub repositories (unless official vendor org)
-          - Archived pages or cached versions
-          - Pages that describe SIEM setup (not product native)
+        NOT ACCEPTABLE AS PRIMARY EVIDENCE:
+          - SIEM setup guides that do not prove product-native telemetry
+          - Unrelated marketing content with no technical detail
+          - Archived pages when newer conflicting documentation exists
+        ALLOWED AS SUPPORTING EVIDENCE:
+          - Reputable third-party community/blog content (mark in notes as community-sourced)
+          - GitHub repositories from official vendor organizations
     }
 
   If log_sources is empty: Return ONLY {"dc_id": "...", "dc_name": "...", "log_sources": []}
@@ -756,12 +983,15 @@ OVERALL OUTPUT STRUCTURE:
       "dc_id": "DC0001",
       "dc_name": "Data Component Name",
       "log_sources": [
-        {
-          "name": "log source name",
-          "channel": ["channel1", "channel2"],
-          "notes": "Mapping rationale and enablement/limitation notes.",
-          "source_url": "https://vendor-owned-domain.com/docs/..."
-        }
+	        {
+	          "name": "log source name",
+	          "channel": ["channel1", "channel2"],
+	          "required_fields": ["field_a", "field_b"],
+	          "missing_fields": ["field_c"],
+	          "evidence": "Short field-level mapping rationale.",
+	          "notes": "Mapping rationale and enablement/limitation notes.",
+	          "source_url": "https://vendor-or-platform-domain.com/docs/..."
+	        }
       ]
     },
     {
@@ -784,12 +1014,15 @@ Validation checklist - answer each question before returning output:
 
 [ ] For EVERY log_sources entry:
     [ ] "name" matches vendor documentation (case-sensitive, exact spelling)
+    [ ] Exact name match to MITRE hint is NOT required; semantic equivalence is acceptable
     [ ] "channel" contains ONLY concrete technical identifiers (not generic labels)
     [ ] "channel" is NEVER ["NULL"] unless explicitly documented in notes
     [ ] "notes" includes mapping rationale + enablement status (if not default)
-    [ ] "source_url" points to vendor-owned domain
-    [ ] "source_url" actually substantiates the log source name and channel
-    [ ] Vendor docs explicitly mention this product (not inferred from suite/parent)
+	    [ ] "source_url" points to authoritative vendor/platform domain
+	    [ ] "source_url" actually substantiates the log source name and channel
+	    [ ] Docs clearly tie the log source to the product or its platform/module
+	    [ ] required_fields/missing_fields (if provided) are used ONLY as fidelity signal
+	        and do NOT by themselves disqualify an otherwise valid log source
 
 [ ] For empty log_sources (when returning []):
     [ ] Document in "note" field why this DC is not covered
@@ -806,8 +1039,8 @@ Validation checklist - answer each question before returning output:
     [ ] Include source_url pointing to configuration guide (if available)
 
 [ ] Confidence in output:
-    [ ] HIGH confidence: Vendor docs explicitly name the product, channel is documented, multiple fields support DC
-    [ ] MEDIUM confidence: Vendor docs support, some inference about channel, clear field mappings
+    [ ] HIGH confidence: Log source + fields documented, strong alignment to DC (explicit DC mention not required)
+    [ ] MEDIUM confidence: Log source documented, reasonable inference to DC from fields
     [ ] If lower: leave log_sources empty instead of guessing
 
 ================================================================================
@@ -816,7 +1049,7 @@ RESEARCH STRATEGY
 
 PHASE 1: QUICK DISCOVERY (30 minutes per DC)
 --------------------------------------------------------------------------------
-  1. Search vendor-owned docs for ${productSearch} "[data component name]"
+  1. Search authoritative docs for ${productSearch} "[data component name]"
   2. Search for ${productSearch} logging + "[DC concept]" (e.g., "authentication logging")
   3. Search for ${productSearch} audit
   4. Scan API/integration documentation for log output types
@@ -831,8 +1064,8 @@ PHASE 2: DEEP RESEARCH (if Phase 1 inconclusive, 30-60 minutes per DC)
 
 PHASE 3: VALIDATION (15 minutes per log source)
 --------------------------------------------------------------------------------
-  1. Verify vendor-owned domain in source_url
-  2. Confirm product name explicitly mentioned (not inferred)
+  1. Verify authoritative vendor/platform domain in source_url
+  2. Confirm log source belongs to the product or platform/module
   3. Cross-check field names against schema docs
   4. Verify channel identifier is documented (not invented)
 
@@ -850,10 +1083,12 @@ IMPORTANT REMINDERS
    OK: "ecc_queue" database table (product-native)
    NO: "Splunk TA ServiceNow inputs.conf" (SIEM-specific)
 
-2. VENDOR-OWNED SOURCES ONLY
-   Use official vendor documentation as source of truth.
-   OK: docs.vendor.com, vendor.io, vendor.com/docs
-   NO: blog.vendor.com (marketing), github.com/vendor (repo, not docs)
+2. SOURCE HIERARCHY
+   Prefer official vendor/platform-owner documentation as source of truth.
+   OK: docs.vendor.com, vendor.com/docs, docs.microsoft.com, docs.aws.amazon.com
+   Community sources are acceptable when official docs are incomplete, but
+   must be marked as community-sourced in notes and should not be the only weak claim.
+   NO: SIEM setup guides as primary proof, unrelated marketing pages
 
 3. CONCRETE CHANNELS ONLY
    Always use technical identifiers; never generic labels.
@@ -862,10 +1097,8 @@ IMPORTANT REMINDERS
 
 4. CONFIDENCE OVER COVERAGE
    Include only high/medium confidence mappings.
+   Inference is allowed when fields clearly satisfy DC semantics.
    If uncertain: return empty log_sources (do not guess).
-
-   Better to say: "We don't have reliable data on this DC"
-   Than to say: "We map it, but we're not sure"
 
 5. ENABLEMENT TRANSPARENCY
    If logging is not enabled by default:
@@ -883,7 +1116,7 @@ INSTRUCTIONS
 ================================================================================
 
 1. Work through EACH Data Component in order (Step 1-12 for each)
-2. For each DC, search vendor-owned documentation systematically
+2. For each DC, search authoritative documentation systematically
 3. Identify candidate log sources (Step 3-4)
 4. Map to concrete channel identifiers (Step 7)
 5. Validate against quality gates (Step 12)
@@ -901,11 +1134,23 @@ No markdown, no code fences, no explanatory text before or after JSON.
   }
 
   private buildPlatformPrompt(input: PlatformCheckInput): string {
-    const vendor = sanitizeInput(input.vendor || "Unknown");
-    const product = sanitizeInput(input.product || "Unknown");
+    const vendorValue = input.vendor?.trim() ? sanitizeInput(input.vendor) : "";
+    const productValue = input.product?.trim() ? sanitizeInput(input.product) : "";
+    const aliasList = Array.isArray(input.aliases)
+      ? Array.from(new Set(input.aliases.map((alias) => sanitizeInput(alias)).filter(Boolean)))
+      : [];
+    const vendor = vendorValue || "Unknown";
+    const product = productValue || vendorValue || "Unknown";
+    const productIdentifier = vendorValue && productValue
+      ? `${vendorValue} ${productValue}`
+      : (productValue || vendorValue || "Unknown");
+    const searchTokens = Array.from(new Set([productIdentifier, ...aliasList].filter(Boolean)));
+    const productSearch = searchTokens.map((token) => `"${token}"`).join(" OR ") || `"${productIdentifier}"`;
     const description = sanitizeInput(input.description || "No description provided.");
     const selectedPlatforms = input.platforms.length > 0 ? input.platforms.join(", ") : "None selected";
     const normalizedPlatforms = normalizePlatformList(input.platforms).map((platform) => platform.toLowerCase());
+    const hasSelectedPlatforms = input.platforms.length > 0;
+    
     const focusRules: string[] = [];
     if (normalizedPlatforms.some((platform) => ["windows", "linux", "macos", "android", "ios"].includes(platform))) {
       focusRules.push("Focus on host-based telemetry and local agent documentation. Exclude managed or PaaS offerings.");
@@ -934,27 +1179,79 @@ No markdown, no code fences, no explanatory text before or after JSON.
       focusRules.push("Focus on ESXi or vSphere telemetry. Exclude guest OS logs unless explicitly part of the product.");
     }
     const focusText = focusRules.length > 0 ? `\nFocus rules:\n- ${focusRules.join("\n- ")}` : "";
+    const mode = hasSelectedPlatforms ? "VALIDATE_SELECTED" : "SUGGEST_AND_VALIDATE";
+    const modeSpecificConstraints = hasSelectedPlatforms
+      ? `
+MODE-SPECIFIC CONSTRAINTS (VALIDATE_SELECTED):
+- The user selected: [${selectedPlatforms}]
+- Validate ONLY these selected platforms in validation[].
+- Return one validation entry for EACH selected platform exactly once.
+- Do NOT add extra platforms to validation[].
+- If you find additional valid platforms outside selected scope, place them ONLY in alternative_platforms_found[].
+- Never return empty validation[] when selected platforms are provided.
+`
+      : `
+MODE-SPECIFIC CONSTRAINTS (SUGGEST_AND_VALIDATE):
+- No platforms are pre-selected by the user.
+- Determine which allowlisted platforms are supported by evidence.
+- Include each supported platform in suggested_platforms[].
+- Include validation[] entries for supported platforms in suggested_platforms[].
+- Keep unsupported/no-evidence platforms out of suggested_platforms[].
+- In this mode, validation[] must contain only supported platforms (is_supported=true).
+`;
 
     return `
-You are a detection engineer reviewing vendor documentation to identify the correct MITRE platform categories for a product.
+You are a detection engineer reviewing vendor documentation to determine and validate MITRE ATT&CK platform mappings for a security product.
 
+MODE: """${mode}"""
 Product: """${vendor} ${product}"""
+Product Identifier: """${productIdentifier}"""
+Product Aliases: """${aliasList.length > 0 ? aliasList.join(", ") : "None provided"}"""
+Product Search String: """${productSearch}"""
 Description: """${description}"""
-User-selected focus: """${selectedPlatforms}"""
+User-selected platforms: """${selectedPlatforms}"""
+Allowlist: """${ALLOWED_PLATFORMS.join(", ")}"""${focusText}
 
-CRITICAL CONSTRAINT:
-The user is specifically mapping this product for the [${selectedPlatforms}] platform(s).
-Do NOT suggest additional platforms simply because they exist (for example, do not suggest SaaS/Azure SQL if the user is mapping on-prem Windows SQL).
-Only suggest an additional platform if it is a TECHNICAL REQUIREMENT for the selected platform to function.
-If you find cloud-native variants or unrelated deployments, ignore them for validation and list them under alternative_platforms_found instead.${focusText}
+TASK:
+- Research product/platform documentation and determine supported ATT&CK platforms.
+- Use Google Search grounding when available.
+- If grounding is unavailable, continue with best-effort research and state that fallback clearly in "note".
+- Use only allowlisted platform labels.
+- Produce evidence-backed results only.
 
-Use Google Search grounding to find authoritative sources.
-Validate each selected platform with documentation evidence of telemetry or monitoring coverage.
-If you cannot validate a selected platform, mark it as not supported.
-If unsure, do not suggest that platform.
-Use only this allowlist: ${ALLOWED_PLATFORMS.join(", ")}.
-Return JSON only in this shape:
+${modeSpecificConstraints}
+
+RELIABILITY REQUIREMENTS:
+- Identity disambiguation first:
+  1. Confirm pages reference this exact product identifier or a listed alias
+  2. Exclude similarly named products, partner integrations, or unrelated modules
+- Source quality priority (highest to lowest):
+  1. Official product documentation and admin guides
+  2. Official API/schema/logging reference docs
+  3. Official vendor knowledge base / release notes
+  4. Platform-owner docs (AWS/Azure/GCP/Microsoft/Google) when telemetry is platform-native
+- Third-party blogs, analyst writeups, community research, and marketing pages may be used as evidence.
+  If official docs are missing, you may still claim support when at least 2 independent, recent,
+  reputable community sources agree on concrete telemetry/platform behavior.
+  In that case, explicitly state in "reasoning" and/or "note" that support is community-sourced.
+- Freshness: prefer recent/current docs; if evidence is old or version-limited, mention in "note".
+- IaaS decision rule (strict):
+  - Mark "IaaS" supported ONLY when evidence shows customer-deployed or customer-managed deployment in the customer's cloud account/subscription/project.
+  - "Runs on AWS/Azure/GCP", vendor-hosted architecture, or cloud API integration alone is NOT enough to claim "IaaS".
+  - If evidence indicates vendor-hosted SaaS on cloud infrastructure, classify as "SaaS" (or cloud-provider specific platforms if explicitly documented), not "IaaS".
+  - Return verdicts using allowlisted canonical labels only.
+- Minimum research breadth:
+  - At least 3 targeted searches for each platform before marking unsupported/no evidence
+
+EVIDENCE CONTRACT:
+- supported entries must include reasoning + evidence + source_url when available
+- unsupported entries (used in VALIDATE_SELECTED mode) must include reasoning + evidence describing what was checked and what was missing
+- do not fabricate links; omit source_url only if no credible URL exists after research
+
+Return JSON only with these top-level keys (do not add top-level fields).
+"source_url" is optional per entry:
 {
+  "suggested_platforms": ["Windows", "Linux", ...],
   "validation": [
     {
       "platform": "Windows",
@@ -982,7 +1279,10 @@ Return JSON only in this shape:
     if (!clientInfo || !this.modelName) return null;
     const { client, modelName } = clientInfo;
 
-    const baseName = [input.vendor, input.product].filter(Boolean).join(" ").trim();
+    const aliasList = Array.isArray(input.aliases)
+      ? input.aliases.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : [];
+    const baseName = [input.vendor, input.product, ...aliasList].filter(Boolean).join(" ").trim();
     if (!baseName) {
       return {
         model: this.modelName,
@@ -997,42 +1297,21 @@ Return JSON only in this shape:
     }
 
     const prompt = this.buildPrompt(input);
-    const response = await client.models.generateContent({
-      model: modelName,
-      contents: prompt,
-      config: await buildGroundedConfig() as any,
-    });
+    const { response, fallbackNote } = await this.generateWithGroundingFallback(client, modelName, prompt);
     const text = await readResponseText(response);
     const payload = extractJsonPayload(text) as any;
-
-    const root = getResponseRoot(response);
-    const candidate = root?.candidates?.[0];
-    const grounding = candidate?.groundingMetadata || candidate?.grounding_metadata;
-    const sourcesMap = new Map<string, { title?: string; url: string }>();
-
-    const addSource = (url?: string, title?: string) => {
-      if (!url) return;
-      const normalized = normalizeUrl(url);
-      if (!normalized) return;
-      if (!sourcesMap.has(normalized)) {
-        sourcesMap.set(normalized, { title, url: normalized });
-      }
-    };
-
-    const chunks = grounding?.groundingChunks || grounding?.grounding_chunks || [];
-    chunks.forEach((chunk: any) => addSource(chunk.web?.uri || chunk.web?.url, chunk.web?.title));
-
-    const citations = candidate?.citationMetadata?.citationSources
-      || candidate?.citation_metadata?.citation_sources
-      || [];
-    citations.forEach((citation: any) => addSource(citation.uri || citation.url));
+    const sourcesMap = extractSources(response);
 
     const allowedUrls = new Set(
       Array.from(sourcesMap.keys()).map((url) => url.toLowerCase())
     );
 
+    const normalizeDcKey = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, "");
     const candidateIds = new Set(
       input.dataComponents.map((dc) => dc.id.toLowerCase())
+    );
+    const candidateIdByCompactKey = new Map(
+      input.dataComponents.map((dc) => [normalizeDcKey(dc.id), dc.id])
     );
     const candidateNameToId = new Map(
       input.dataComponents.map((dc) => [dc.name.trim().toLowerCase(), dc.id])
@@ -1063,6 +1342,13 @@ Return JSON only in this shape:
       const normalizedId = dcId.toLowerCase();
       const normalizedName = dcName.toLowerCase();
       if (!candidateIds.has(normalizedId)) {
+        const compactId = dcId ? normalizeDcKey(dcId) : "";
+        const mappedByCompactId = compactId ? candidateIdByCompactKey.get(compactId) : undefined;
+        if (mappedByCompactId) {
+          dcId = mappedByCompactId;
+        }
+      }
+      if (!candidateIds.has(dcId.toLowerCase())) {
         const mappedId = candidateNameToId.get(normalizedName);
         if (mappedId) {
           dcId = mappedId;
@@ -1096,21 +1382,40 @@ Return JSON only in this shape:
             const notes = typeof source?.notes === "string"
               ? source.notes.trim()
               : typeof source?.note === "string" ? source.note.trim() : undefined;
-            const sourceUrl = typeof source?.source_url === "string"
+            const sourceUrlRaw = typeof source?.source_url === "string"
               ? source.source_url
               : source?.sourceUrl;
-            const normalizedUrl = sourceUrl ? normalizeUrl(sourceUrl).toLowerCase() : "";
-            const isVerified = normalizedUrl.length > 0 && allowedUrls.has(normalizedUrl);
+            const { sourceUrl, sourceUrlVerified } = resolveSourceReference(
+              sourceUrlRaw,
+              allowedUrls,
+              sourcesMap
+            );
             if (!name) return null;
-            const canonicalUrl = sourceUrl
-              ? sourcesMap.get(normalizeUrl(sourceUrl))?.url || normalizeUrl(sourceUrl)
-              : undefined;
+            const requiredFieldsRaw = Array.isArray(source?.required_fields)
+              ? source.required_fields
+              : Array.isArray(source?.requiredFields) ? source.requiredFields : [];
+            const missingFieldsRaw = Array.isArray(source?.missing_fields)
+              ? source.missing_fields
+              : Array.isArray(source?.missingFields) ? source.missingFields : [];
+            const requiredFields = requiredFieldsRaw
+              .map((field: unknown) => (typeof field === "string" ? field.trim() : ""))
+              .filter((field: string) => field.length > 0);
+            const missingFields = missingFieldsRaw
+              .map((field: unknown) => (typeof field === "string" ? field.trim() : ""))
+              .filter((field: string) => field.length > 0);
+            const normalizedNotes = notes || "";
+            const notesWithCitation = sourceUrl && sourceUrlVerified === false
+              ? `${normalizedNotes}${normalizedNotes ? " " : ""}Source URL was not grounding-verified; review evidence manually.`
+              : normalizedNotes;
             return {
               name,
               channel,
-              notes,
-              sourceUrl: canonicalUrl,
-              verifiedByAi: sourceUrl ? isVerified : undefined,
+              requiredFields: requiredFields.length > 0 ? requiredFields : undefined,
+              missingFields: missingFields.length > 0 ? missingFields : undefined,
+              evidence: typeof source?.evidence === "string" ? source.evidence.trim() : undefined,
+              notes: notesWithCitation || undefined,
+              sourceUrl,
+              verifiedByAi: sourceUrl ? sourceUrlVerified : undefined,
             } as ResearchLogSource;
           })
           .filter((source): source is ResearchLogSource => Boolean(source))
@@ -1144,17 +1449,24 @@ Return JSON only in this shape:
         .map((entry: any) => {
           const platform = typeof entry?.platform === "string" ? entry.platform.trim() : "";
           if (!platform || !allowedPlatformSet.has(platform.toLowerCase())) return null;
-          const sourceUrl = typeof entry?.source_url === "string"
+          const sourceUrlRaw = typeof entry?.source_url === "string"
             ? entry.source_url
             : typeof entry?.sourceUrl === "string" ? entry.sourceUrl : "";
-          const normalizedUrl = sourceUrl ? normalizeUrl(sourceUrl).toLowerCase() : "";
-          if (!normalizedUrl) return null;
-          if (!allowedUrls.has(normalizedUrl)) return null;
+          const { sourceUrl, sourceUrlVerified } = resolveSourceReference(
+            sourceUrlRaw,
+            allowedUrls,
+            sourcesMap
+          );
+          const rawReason = typeof entry?.reason === "string" ? entry.reason.trim() : "";
+          const reason = sourceUrl && sourceUrlVerified === false
+            ? `${rawReason}${rawReason ? " " : ""}Source URL was not grounding-verified; review evidence manually.`
+            : (rawReason || undefined);
           return {
             platform,
-            reason: typeof entry?.reason === "string" ? entry.reason.trim() : undefined,
+            reason,
             evidence: typeof entry?.evidence === "string" ? entry.evidence.trim() : undefined,
-            sourceUrl: normalizedUrl ? sourcesMap.get(normalizeUrl(sourceUrl))?.url || normalizeUrl(sourceUrl) : undefined,
+            sourceUrl,
+            sourceUrlVerified,
           } as ResearchPlatformSuggestion;
         })
         .filter((entry): entry is ResearchPlatformSuggestion => Boolean(entry))
@@ -1165,7 +1477,10 @@ Return JSON only in this shape:
       results,
       platformSuggestions,
       sources,
-      note: payload.note || (sources.length === 0 ? "No grounded sources were returned for this query." : undefined),
+      note: [payload.note, fallbackNote, (sources.length === 0 ? "No grounded sources were returned for this query." : undefined)]
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .join(" ")
+        || undefined,
     };
   }
 
@@ -1174,7 +1489,10 @@ Return JSON only in this shape:
     if (!clientInfo || !this.modelName) return null;
     const { client, modelName } = clientInfo;
 
-    const baseName = [input.vendor, input.product].filter(Boolean).join(" ").trim();
+    const aliasList = Array.isArray(input.aliases)
+      ? input.aliases.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : [];
+    const baseName = [input.vendor, input.product, ...aliasList].filter(Boolean).join(" ").trim();
     if (!baseName) {
       return {
         model: this.modelName,
@@ -1186,35 +1504,10 @@ Return JSON only in this shape:
     }
 
     const prompt = this.buildPlatformPrompt(input);
-    const response = await client.models.generateContent({
-      model: modelName,
-      contents: prompt,
-      config: await buildGroundedConfig() as any,
-    });
+    const { response, fallbackNote } = await this.generateWithGroundingFallback(client, modelName, prompt);
     const text = await readResponseText(response);
-    const payload = extractPlatformCheckPayload(text);
-
-    const root = getResponseRoot(response);
-    const candidate = root?.candidates?.[0];
-    const grounding = candidate?.groundingMetadata || candidate?.grounding_metadata;
-    const sourcesMap = new Map<string, { title?: string; url: string }>();
-
-    const addSource = (url?: string, title?: string) => {
-      if (!url) return;
-      const normalized = normalizeUrl(url);
-      if (!normalized) return;
-      if (!sourcesMap.has(normalized)) {
-        sourcesMap.set(normalized, { title, url: normalized });
-      }
-    };
-
-    const chunks = grounding?.groundingChunks || grounding?.grounding_chunks || [];
-    chunks.forEach((chunk: any) => addSource(chunk.web?.uri || chunk.web?.url, chunk.web?.title));
-
-    const citations = candidate?.citationMetadata?.citationSources
-      || candidate?.citation_metadata?.citation_sources
-      || [];
-    citations.forEach((citation: any) => addSource(citation.uri || citation.url));
+    const payload = extractPlatformCheckPayload(text) as any;
+    const sourcesMap = extractSources(response);
 
     const allowedUrls = new Set(
       Array.from(sourcesMap.keys()).map((url) => url.toLowerCase())
@@ -1238,19 +1531,41 @@ Return JSON only in this shape:
             if (normalized === "false" || normalized === "no") isSupported = false;
           }
           if (isSupported === null) return null;
-          const sourceUrl = typeof entry?.source_url === "string"
+          const sourceUrlRaw = typeof entry?.source_url === "string"
             ? entry.source_url
             : typeof entry?.sourceUrl === "string" ? entry.sourceUrl : "";
-          const normalizedUrl = sourceUrl ? normalizeUrl(sourceUrl).toLowerCase() : "";
-          if (!normalizedUrl || !allowedUrls.has(normalizedUrl)) return null;
+          const { sourceUrl, sourceUrlVerified } = resolveSourceReference(
+            sourceUrlRaw,
+            allowedUrls,
+            sourcesMap
+          );
+          const rawReasoning = typeof entry?.reasoning === "string"
+            ? entry.reasoning.trim()
+            : typeof entry?.reason === "string" ? entry.reason.trim() : "";
+          const rawEvidence = typeof entry?.evidence === "string" ? entry.evidence.trim() : "";
+          const iaasCandidate = platform.toLowerCase() === "iaas" && isSupported === true;
+          if (iaasCandidate) {
+            const combinedEvidence = `${rawReasoning} ${rawEvidence}`.trim();
+            const hasPositiveSignal = containsAny(combinedEvidence, IAAS_POSITIVE_SIGNALS);
+            const hasNegativeSignal = containsAny(combinedEvidence, IAAS_NEGATIVE_SIGNALS);
+            if (!hasPositiveSignal || hasNegativeSignal) {
+              isSupported = false;
+            }
+          }
+          const unsupportedByIaasRule = platform.toLowerCase() === "iaas" && isSupported === false && iaasCandidate;
+          const baseReasoning = unsupportedByIaasRule
+            ? `${rawReasoning}${rawReasoning ? " " : ""}Downgraded by policy: IaaS requires explicit customer-managed deployment evidence; vendor-hosted or provider-name-only evidence is insufficient.`.trim()
+            : rawReasoning;
+          const reasoning = sourceUrl && sourceUrlVerified === false
+            ? `${baseReasoning}${baseReasoning ? " " : ""}Source URL was not grounding-verified; review evidence manually.`
+            : (baseReasoning || undefined);
           return {
             platform,
             isSupported,
-            reasoning: typeof entry?.reasoning === "string"
-              ? entry.reasoning.trim()
-              : typeof entry?.reason === "string" ? entry.reason.trim() : undefined,
-            evidence: typeof entry?.evidence === "string" ? entry.evidence.trim() : undefined,
-            sourceUrl: sourcesMap.get(normalizeUrl(sourceUrl))?.url || normalizeUrl(sourceUrl),
+            reasoning,
+            evidence: rawEvidence || undefined,
+            sourceUrl,
+            sourceUrlVerified,
           } as PlatformValidationResult;
         })
         .filter((entry): entry is PlatformValidationResult => Boolean(entry))
@@ -1262,28 +1577,55 @@ Return JSON only in this shape:
         .map((entry: any) => {
           const platform = typeof entry?.platform === "string" ? entry.platform.trim() : "";
           if (!platform || !allowedPlatformSet.has(platform.toLowerCase())) return null;
-          const sourceUrl = typeof entry?.source_url === "string"
+          const sourceUrlRaw = typeof entry?.source_url === "string"
             ? entry.source_url
             : typeof entry?.sourceUrl === "string" ? entry.sourceUrl : "";
-          const normalizedUrl = sourceUrl ? normalizeUrl(sourceUrl).toLowerCase() : "";
-          if (!normalizedUrl || !allowedUrls.has(normalizedUrl)) return null;
+          const { sourceUrl, sourceUrlVerified } = resolveSourceReference(
+            sourceUrlRaw,
+            allowedUrls,
+            sourcesMap
+          );
+          const rawReason = typeof entry?.reason === "string" ? entry.reason.trim() : "";
+          const reason = sourceUrl && sourceUrlVerified === false
+            ? `${rawReason}${rawReason ? " " : ""}Source URL was not grounding-verified; review evidence manually.`
+            : (rawReason || undefined);
           return {
             platform,
-            reason: typeof entry?.reason === "string" ? entry.reason.trim() : undefined,
+            reason,
             evidence: typeof entry?.evidence === "string" ? entry.evidence.trim() : undefined,
-            sourceUrl: sourcesMap.get(normalizeUrl(sourceUrl))?.url || normalizeUrl(sourceUrl),
+            sourceUrl,
+            sourceUrlVerified,
           } as PlatformAlternativeResult;
         })
         .filter((entry): entry is PlatformAlternativeResult => Boolean(entry))
       : [];
 
     const sources = Array.from(sourcesMap.values());
+    
+    // Suggested platforms are derived from evidence-backed validation entries.
+    // This prevents auto-selection from unsupported or unverified suggestions.
+    const suggestedPlatforms = Array.from(new Set(
+      validation
+        .filter((entry) => (
+          entry.isSupported
+          && typeof entry.reasoning === "string"
+          && entry.reasoning.trim().length > 0
+          && typeof entry.evidence === "string"
+          && entry.evidence.trim().length > 0
+        ))
+        .map((entry) => entry.platform)
+    ));
+    
     return {
       model: this.modelName,
+      suggestedPlatforms,
       validation,
       alternativePlatformsFound,
       sources,
-      note: payload.note || (sources.length === 0 ? "No grounded sources were returned for this query." : undefined),
+      note: [payload.note, fallbackNote, (sources.length === 0 ? "No grounded sources were returned for this query." : undefined)]
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .join(" ")
+        || undefined,
     };
   }
 }

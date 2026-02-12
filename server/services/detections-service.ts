@@ -104,6 +104,7 @@ async function getSigmaDetections(searchLower: string, includeContent = false): 
         name: String(doc.title || doc.name || ruleId),
         description: typeof doc.description === 'string' ? doc.description : undefined,
         techniqueIds: techniqueIds.length > 0 ? techniqueIds : undefined,
+        query: raw,
         source: 'sigma',
         sourceFile: path.basename(filePath),
       };
@@ -349,7 +350,7 @@ async function readInBatches<T>(
         }
       })
     );
-    results.push(...batchResults.filter((item): item is T => item !== null));
+    results.push(...batchResults.filter((item): item is Awaited<T> => item !== null));
   }
   return results;
 }
@@ -416,11 +417,11 @@ function extractThreatIds(toml: string): string[] {
     if (idMatch) ids.add(idMatch[1]);
   }
   const techniqueRegex = /\[\[rule\.threat\.technique\]\]\s*[\s\S]*?\bid\s*=\s*\"([^\"]+)\"/g;
-  for (const match of toml.matchAll(techniqueRegex)) {
+  for (const match of Array.from(toml.matchAll(techniqueRegex))) {
     ids.add(match[1]);
   }
   const subtechniqueRegex = /\[\[rule\.threat\.technique\.subtechnique\]\]\s*[\s\S]*?\bid\s*=\s*\"([^\"]+)\"/g;
-  for (const match of toml.matchAll(subtechniqueRegex)) {
+  for (const match of Array.from(toml.matchAll(subtechniqueRegex))) {
     ids.add(match[1]);
   }
   return Array.from(ids);

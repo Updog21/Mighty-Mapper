@@ -1,10 +1,13 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../db';
-import { dataComponents, detectionStrategies } from '@shared/schema';
+import { dataComponentPlatforms, dataComponents, detectionStrategies } from '@shared/schema';
 import { settingsService } from './settings-service';
+import { mitreKnowledgeGraph } from '../mitre-stix';
+import { aggregateAllChannels } from '../mitre-stix/channel-aggregator';
+import { normalizePlatformList, PLATFORM_VALUES } from '../../shared/platforms';
 
 const runCommand = (command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> => {
   return new Promise((resolve, reject) => {
@@ -91,6 +94,128 @@ export class AdminService {
   private repoSyncTimer?: NodeJS.Timeout;
   private repoSyncInterval?: NodeJS.Timeout;
 
+  async rebuildDataComponentPlatformMap(trigger: 'startup' | 'manual' | 'scheduled' = 'startup'): Promise<{
+    status: string;
+    message: string;
+    platforms: number;
+    dataComponents: number;
+    mappings: number;
+  }> {
+    try {
+      console.log(`[AdminService] Building data component platform map (${trigger})...`);
+      await mitreKnowledgeGraph.ensureInitialized();
+
+      const normalizedPlatforms = normalizePlatformList([...PLATFORM_VALUES]);
+      const platformToComponents = new Map<string, Set<string>>();
+      normalizedPlatforms.forEach((platform) => platformToComponents.set(platform, new Set()));
+
+      normalizedPlatforms.forEach((platform) => {
+        const dataComponents = mitreKnowledgeGraph.getDataComponentsForPlatformsViaTechniques([platform]);
+        const target = platformToComponents.get(platform);
+        if (!target) return;
+        dataComponents.forEach((dc) => {
+          if (dc.id) target.add(dc.id);
+        });
+      });
+
+      const rows: Array<{ platform: string; dataComponentId: string }> = [];
+      platformToComponents.forEach((components, platform) => {
+        components.forEach((dcId) => {
+          rows.push({ platform, dataComponentId: dcId });
+        });
+      });
+
+      await db.transaction(async (tx) => {
+        await tx.delete(dataComponentPlatforms);
+        if (rows.length === 0) return;
+        const chunkSize = 1000;
+        for (let i = 0; i < rows.length; i += chunkSize) {
+          const chunk = rows.slice(i, i + chunkSize);
+          await tx.insert(dataComponentPlatforms).values(chunk).onConflictDoNothing();
+        }
+      });
+
+      await settingsService.set('last_dc_platform_map', new Date().toISOString());
+      console.log(`[AdminService] Data component platform map ready: ${rows.length} mappings.`);
+
+      return {
+        status: 'success',
+        message: 'Data component platform map rebuilt successfully.',
+        platforms: normalizedPlatforms.length,
+        dataComponents: new Set(rows.map((row) => row.dataComponentId)).size,
+        mappings: rows.length,
+      };
+    } catch (error) {
+      console.error('[AdminService] Failed to rebuild data component platform map:', error);
+      throw new Error(`Failed to rebuild data component platform map: ${(error as Error).message}`);
+    }
+  }
+
+  async rebuildDataComponentLogSources(trigger: 'startup' | 'manual' | 'scheduled' = 'startup'): Promise<{
+    status: string;
+    message: string;
+    dataComponents: number;
+    logSources: number;
+  }> {
+    try {
+      console.log(`[AdminService] Building data component log source table (${trigger})...`);
+      await mitreKnowledgeGraph.ensureInitialized();
+
+      const aggregations = await aggregateAllChannels();
+      if (aggregations.length === 0) {
+        return {
+          status: 'success',
+          message: 'No data component log sources available to rebuild.',
+          dataComponents: 0,
+          logSources: 0,
+        };
+      }
+
+      let updated = 0;
+      let totalSources = 0;
+
+      await db.transaction(async (tx) => {
+        for (const aggregation of aggregations) {
+          const logSources = aggregation.logSources.map((source) => ({
+            name: source.name,
+            channel: source.channel ?? null,
+            frequency: source.frequency,
+          }));
+          totalSources += logSources.length;
+
+          const updatedRows = await tx
+            .update(dataComponents)
+            .set({ logSources })
+            .where(eq(dataComponents.componentId, aggregation.dataComponentId))
+            .returning({ componentId: dataComponents.componentId });
+
+          if (updatedRows.length === 0) {
+            const fallback = await tx
+              .update(dataComponents)
+              .set({ logSources })
+              .where(eq(dataComponents.name, aggregation.dataComponentName))
+              .returning({ componentId: dataComponents.componentId });
+            if (fallback.length > 0) updated += 1;
+          } else {
+            updated += 1;
+          }
+        }
+      });
+
+      await settingsService.set('last_dc_log_source_map', new Date().toISOString());
+
+      return {
+        status: 'success',
+        message: 'Data component log source table rebuilt successfully.',
+        dataComponents: updated,
+        logSources: totalSources,
+      };
+    } catch (error) {
+      console.error('[AdminService] Failed to rebuild data component log sources:', error);
+      throw new Error(`Failed to rebuild data component log sources: ${(error as Error).message}`);
+    }
+  }
+
   async smartRefreshRepo(repoKey: keyof typeof this.REPOS): Promise<{ status: string; message: string }> {
     const repo = this.REPOS[repoKey];
     try {
@@ -144,6 +269,22 @@ export class AdminService {
     } catch (error) {
       console.error('[AdminService] Error running db:push:', error);
       throw new Error(`Failed to run db:push: ${(error as Error).message}`);
+    }
+  }
+
+  async runDbSeed(): Promise<{ status: string; message: string }> {
+    try {
+      const result = await runCommand('npm', ['run', 'db:seed'], process.cwd());
+      const outputLine = result.stdout.split('\n').filter(Boolean).pop();
+      await this.rebuildDataComponentPlatformMap('manual');
+      await this.rebuildDataComponentLogSources('manual');
+      return {
+        status: 'success',
+        message: outputLine || 'Database seed completed successfully.',
+      };
+    } catch (error) {
+      console.error('[AdminService] Error running db:seed:', error);
+      throw new Error(`Failed to run db:seed: ${(error as Error).message}`);
     }
   }
 
@@ -401,6 +542,7 @@ export class AdminService {
       }
 
       await settingsService.set('last_mitre_sync', new Date().toISOString());
+      await this.rebuildDataComponentLogSources(trigger);
 
       return {
         status: 'success',

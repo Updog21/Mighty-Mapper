@@ -1,9 +1,12 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
+import type { JSX } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useLocation } from 'wouter';
-import { Asset, getDetectionStrategiesForProduct, dataComponents, techniques, DetectionStrategy, AnalyticItem, DataComponentRef, detectionStrategies, Technique } from '@/lib/mitreData';
+import { dataComponents, techniques, DetectionStrategy, AnalyticItem, DataComponentRef, detectionStrategies, Technique } from '@/lib/mitreData';
+import { getDetectionStrategiesForProduct } from '@/lib/mitreDataHelpers';
+import type { Asset } from '@/lib/products';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -27,6 +30,9 @@ import {
   Network,
   Box,
   Server,
+  Filter,
+  FileText,
+  FileDown,
   Trash2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -34,13 +40,16 @@ import { useAutoMappingWithAutoRun, RESOURCE_LABELS, ResourceType, StixDataCompo
 import { useProductSsm } from '@/hooks/useProductSsm';
 import { getAggregateCoverage } from '@/lib/ssm-utils';
 import { buildMappingIdsByTechnique, buildMetadataByTechnique, getHybridStrategies } from '@/lib/ssm-hybrid';
+import { toMarkdownTable } from '@/lib/stix-export';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
-import { Filter } from 'lucide-react';
+import { Switch } from '@/components/ui/switch';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useDeleteProduct } from '@/hooks/useProducts';
 import { useToast } from '@/hooks/use-toast';
-import { normalizePlatformList, platformMatchesAny } from '@shared/platforms';
+import { normalizePlatformList, platformMatchesAny, type PlatformValue } from '@shared/platforms';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { StixExportControls } from '@/components/StixExportControls';
 
 interface ProductViewProps {
   product: Asset & { productId?: string; source?: string };
@@ -107,6 +116,192 @@ function getPlatformDisplayName(platform: string) {
 function normalizeTechniqueId(value: string): string {
   const match = value.toUpperCase().match(/T\d{4}(?:\.\d{3})?/);
   return match ? match[0] : value.toUpperCase();
+}
+
+function normalizeDataComponentId(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function getPrimaryTactic(technique?: { tactic?: string; tactics?: string[] }): string | undefined {
+  if (!technique) return undefined;
+  if (Array.isArray(technique.tactics) && technique.tactics.length > 0) {
+    return technique.tactics[0];
+  }
+  return technique.tactic;
+}
+
+type ScenarioQuestionKey =
+  | 'blackBox'
+  | 'passThrough'
+  | 'publicFacing'
+  | 'authHandling'
+  | 'crownJewel'
+  | 'humanSurface';
+
+type ScenarioDropReason = 'blackBox' | 'passThrough' | 'humanSurface';
+
+interface ScenarioAnswers {
+  blackBox: boolean;
+  passThrough: boolean;
+  publicFacing: boolean;
+  authHandling: boolean;
+  crownJewel: boolean;
+  humanSurface: boolean;
+}
+
+const DEFAULT_SCENARIO_ANSWERS: ScenarioAnswers = {
+  blackBox: false,
+  passThrough: false,
+  publicFacing: false,
+  authHandling: false,
+  crownJewel: false,
+  humanSurface: true,
+};
+
+const SCENARIO_QUESTION_LABELS: Record<ScenarioQuestionKey, string> = {
+  blackBox: 'Black Box',
+  passThrough: 'Pass-Through',
+  publicFacing: 'Public-Facing',
+  authHandling: 'Auth Handling',
+  crownJewel: 'Crown Jewel',
+  humanSurface: 'Human Surface',
+};
+
+const SCENARIO_QUESTION_HELP: Record<ScenarioQuestionKey, string> = {
+  blackBox: 'Appliance/SaaS (no OS access) vs full endpoint visibility.',
+  passThrough: 'Gateway/proxy (data in motion) vs storage (data at rest).',
+  publicFacing: 'Internet-exposed vs internal-only.',
+  authHandling: 'Manages logins/keys vs no credentials.',
+  crownJewel: 'Critical asset vs commodity.',
+  humanSurface: 'UI/phishing target vs API-only.',
+};
+
+const SCENARIO_QUESTION_WHY: Record<ScenarioQuestionKey, string> = {
+  blackBox: "Black Box can't see processes/persistence.",
+  passThrough: "Gateways can't collect/store exfil data.",
+  publicFacing: 'Public = high Initial Access risk.',
+  authHandling: 'Auth surfaces brute force/key abuse.',
+  crownJewel: 'Protects highest business impact.',
+  humanSurface: 'No UI = no phishing/user execution.',
+};
+
+const SCENARIO_REFERENCE_LINKS: Array<{ label: string; url: string }> = [
+  { label: 'MITRE ATT&CK STIX', url: 'https://github.com/mitre-attack/attack-stix-data' },
+  { label: 'MITRE ATT&CK Data Sources', url: 'https://github.com/mitre-attack/attack-datasources' },
+  { label: 'MITRE ATT&CK', url: 'https://attack.mitre.org/' },
+  { label: 'ASD Event Logging Best Practices', url: 'https://www.cyber.gov.au/sites/default/files/2024-08/best-practices-for-event-logging-and-threat-detection.pdf' },
+  { label: 'ASD Essential Eight Blueprint', url: 'https://blueprint.asd.gov.au/security-and-governance/essential-eight/' },
+  { label: 'NSA/CISA ATT&CK Defenses', url: 'https://www.nsa.gov/Press-Room/Press-Releases-Statements/Press-Release-View/Article/2716870/nsa-cisa-release-cybersecurity-technical-report-mitre-attck-defenses' },
+  { label: 'CISA RVA ATT&CK Mapping', url: 'https://industrialcyber.co/cisa/cisa-report-detects-risk-and-vulnerability-assessments-plotted-to-mitre-attck-framework/' },
+  { label: 'SpecterOps Prioritization', url: 'https://posts.specterops.io/prioritization-of-the-detection-engineering-backlog-dcb18a896981' },
+  { label: 'Kaspersky Prioritization', url: 'https://securelist.com/detection-engineering-backlog-prioritization/113099/' },
+  { label: 'DeTT&CT Visibility Scoring', url: 'https://github.com/rabobank-cdc/DeTTECT/wiki/Visibility-scoring' },
+  { label: 'Red Canary Techniques', url: 'https://redcanary.com/threat-detection-report/techniques/' },
+  { label: 'Lockheed Cyber Kill Chain (PDF)', url: 'https://www.lockheedmartin.com/content/dam/lockheed-martin/rms/documents/cyber/Gaining_the_Advantage_Cyber_Kill_Chain.pdf' },
+];
+
+const BLACK_BOX_DROP_TACTICS = new Set([
+  'execution',
+  'persistence',
+  'privilege escalation',
+  'defense evasion',
+]);
+
+const PASS_THROUGH_DROP_TACTICS = new Set([
+  'collection',
+  'exfiltration',
+]);
+
+const HUMAN_SURFACE_DENYLIST = [
+  'T1566',
+  'T1189',
+  'T1204',
+  'T1539',
+  'T1622',
+  'T1557',
+  'T1606',
+  'T1195',
+  'T1525',
+];
+
+function normalizeTacticKey(value?: string | null): string {
+  if (!value) return '';
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function techniqueMatchesPrefix(techniqueId: string, prefix: string): boolean {
+  const normalized = normalizeTechniqueId(techniqueId);
+  return normalized === prefix || normalized.startsWith(`${prefix}.`);
+}
+
+function inferScenarioAnswers(productName: string, platforms: string[]): ScenarioAnswers {
+  const normalizedPlatforms = normalizePlatformList(platforms);
+  const platformSet = new Set(normalizedPlatforms);
+  const name = productName.toLowerCase();
+
+  const endpointPlatforms: PlatformValue[] = ['Windows', 'Linux', 'macOS', 'Android', 'iOS'];
+  const endpointVisible = endpointPlatforms.some((entry) => platformSet.has(entry));
+  const applianceOrSaasPlatforms = ['SaaS', 'Network Devices', 'IaaS', 'Containers', 'Identity Provider', 'Office 365', 'Google Workspace'];
+  const mostlyBlackBox = !endpointVisible && normalizedPlatforms.length > 0
+    && normalizedPlatforms.every((entry) => applianceOrSaasPlatforms.includes(entry));
+
+  const passThroughKeyword = /(gateway|proxy|firewall|load balancer|edge|waf|reverse proxy|api management|api gateway|ingress)/i;
+  const authKeyword = /(auth|identity|login|sso|oauth|oidc|iam|directory|entra|okta|access control|credential)/i;
+  const crownKeyword = /(security|siem|xdr|edr|identity|api|database|data lake|vault|critical)/i;
+
+  const passThrough = platformSet.has('Network Devices') || passThroughKeyword.test(name);
+  const publicFacing = passThrough || platformSet.has('SaaS') || platformSet.has('IaaS') || /public|external|internet|edge|portal|api/.test(name);
+  const authHandling = platformSet.has('Identity Provider')
+    || platformSet.has('Office 365')
+    || platformSet.has('Google Workspace')
+    || authKeyword.test(name);
+  const crownJewel = authHandling || crownKeyword.test(name);
+  const humanSurface = endpointVisible
+    || platformSet.has('Office 365')
+    || platformSet.has('Google Workspace')
+    || /email|browser|workspace|office|portal|service desk|ticket|collaboration/.test(name);
+
+  return {
+    blackBox: mostlyBlackBox,
+    passThrough,
+    publicFacing,
+    authHandling,
+    crownJewel,
+    humanSurface,
+  };
+}
+
+function getScenarioDropReason(
+  techniqueId: string,
+  tactic: string,
+  answers: ScenarioAnswers
+): ScenarioDropReason | null {
+  const normalizedTactic = normalizeTacticKey(tactic);
+  if (answers.blackBox && BLACK_BOX_DROP_TACTICS.has(normalizedTactic)) {
+    return 'blackBox';
+  }
+  if (answers.passThrough && PASS_THROUGH_DROP_TACTICS.has(normalizedTactic)) {
+    return 'passThrough';
+  }
+  if (!answers.humanSurface && HUMAN_SURFACE_DENYLIST.some((prefix) => techniqueMatchesPrefix(techniqueId, prefix))) {
+    return 'humanSurface';
+  }
+  return null;
+}
+
+function getScenarioBoostMultiplier(tactic: string, answers: ScenarioAnswers): number {
+  const normalizedTactic = normalizeTacticKey(tactic);
+  let multiplier = 1;
+  if (answers.publicFacing && normalizedTactic === 'initial access') {
+    multiplier *= 2.0;
+  }
+  if (answers.authHandling && normalizedTactic === 'credential access') {
+    multiplier *= 2.0;
+  }
+  if (answers.crownJewel && normalizedTactic === 'impact') {
+    multiplier *= 1.5;
+  }
+  return multiplier;
 }
 
 interface LogSourceRow {
@@ -189,19 +384,19 @@ function DataComponentDetail({
     return value.join(', ');
   };
   
-  const filteredLogSources = dc.logSources?.filter(ls => 
+  const filteredLogSources = (dc as any).logSources?.filter((ls: any) =>
     prefixes.some(prefix => ls.name.toLowerCase().startsWith(prefix.toLowerCase()))
   ) || [];
-  
-  const platformMeasure = dc.dataCollectionMeasures?.find(m => platformMatchesAny([m.platform], [platform]));
+
+  const platformMeasure = (dc as any).dataCollectionMeasures?.find((m: any) => platformMatchesAny([m.platform], [platform]));
 
   return (
     <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div 
-        className="bg-background border border-border rounded-lg max-w-3xl w-full max-h-[85vh] overflow-auto shadow-xl"
+        className="bg-background rounded-lg max-w-3xl w-full max-h-[85vh] overflow-auto shadow-xl"
         onClick={e => e.stopPropagation()}
       >
-        <div className="sticky top-0 bg-background border-b border-border px-6 py-4 flex items-center justify-between">
+        <div className="sticky top-0 bg-background px-6 py-4 flex items-center justify-between">
           <div>
             <div className="flex items-center gap-2 mb-1">
               <code className="text-sm text-primary font-mono">{dc.id}</code>
@@ -229,7 +424,7 @@ function DataComponentDetail({
                 <Info className="w-4 h-4 text-primary" />
                 Data Collection Measures ({platform})
               </h3>
-              <div className="bg-muted/30 border border-border rounded-md p-4">
+              <div className="bg-muted/30 rounded-md p-4">
                 <p className="text-sm text-foreground">{platformMeasure.description}</p>
               </div>
             </div>
@@ -241,7 +436,7 @@ function DataComponentDetail({
               Log Sources ({platform})
             </h3>
             {filteredLogSources.length > 0 ? (
-              <div className="border border-border rounded-md overflow-hidden">
+              <div className="rounded-md overflow-hidden border border-border keep-border">
                 <table className="w-full text-sm">
                   <thead className="bg-muted/50">
                     <tr>
@@ -250,7 +445,7 @@ function DataComponentDetail({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border">
-                    {filteredLogSources.map((ls, idx) => (
+                    {filteredLogSources.map((ls: any, idx: any) => (
                       <tr key={idx}>
                         <td className="px-4 py-2 font-mono text-foreground">{ls.name}</td>
                         <td className="px-4 py-2 text-muted-foreground">{ls.channel}</td>
@@ -260,7 +455,7 @@ function DataComponentDetail({
                 </table>
               </div>
             ) : (
-              <div className="text-sm text-muted-foreground border border-dashed border-border rounded-md p-4 text-center">
+              <div className="text-sm text-muted-foreground rounded-md p-4 text-center">
                 No log sources defined for {platform} in this data component.
               </div>
             )}
@@ -272,7 +467,7 @@ function DataComponentDetail({
                 <Database className="w-4 h-4 text-primary" />
                 Vendor Log Sources
               </h3>
-              <div className="border border-border rounded-md overflow-hidden">
+              <div className="rounded-md overflow-hidden border border-border keep-border">
                 <table className="w-full text-sm">
                   <thead className="bg-muted/50">
                     <tr>
@@ -310,7 +505,7 @@ function DataComponentDetail({
             </div>
           )}
 
-          <div className="pt-4 border-t border-border">
+          <div className="pt-4">
             <a
               href={`https://attack.mitre.org/datasources/${dc.dataSource.replace(/\s+/g, '%20')}/`}
               target="_blank"
@@ -369,10 +564,18 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const [expandedSubtechniques, setExpandedSubtechniques] = useState<Set<string>>(new Set());
   const [activeSection, setActiveSection] = useState('overview');
   const [selectedDataComponent, setSelectedDataComponent] = useState<DataComponentRef | null>(null);
+  const [selectedTechniqueIds, setSelectedTechniqueIds] = useState<Set<string>>(new Set());
+  const [selectedDataComponentIds, setSelectedDataComponentIds] = useState<Set<string>>(new Set());
+  const [scenarioFilterEnabled, setScenarioFilterEnabled] = useState(false);
+  const [scenarioAnswers, setScenarioAnswers] = useState<ScenarioAnswers>(DEFAULT_SCENARIO_ANSWERS);
+  const [scenarioMaxTechniques, setScenarioMaxTechniques] = useState(12);
+  const [scenarioShowAll, setScenarioShowAll] = useState(false);
+  const [scenarioOverrideTechniqueIds, setScenarioOverrideTechniqueIds] = useState<Set<string>>(new Set());
   const [sourceFilters, setSourceFilters] = useState<Set<ResourceType>>(() => new Set<ResourceType>(['ctid', 'sigma', 'elastic', 'splunk', 'azure']));
   const [showSourceFilter, setShowSourceFilter] = useState(false);
   const [showAllTechniques, setShowAllTechniques] = useState(false);
   const [showAllDataComponents, setShowAllDataComponents] = useState(false);
+  const [exportNotes, setExportNotes] = useState('');
   const [newAlias, setNewAlias] = useState('');
   const [isEvidenceDialogOpen, setIsEvidenceDialogOpen] = useState(false);
   const [evidenceTechniqueId, setEvidenceTechniqueId] = useState('');
@@ -380,6 +583,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const [evidenceEntries, setEvidenceEntries] = useState<Array<{ name: string; channel: string; eventId: string; dataComponent: string }>>([]);
   const [evidenceQuery, setEvidenceQuery] = useState('');
   const [evidenceCaveats, setEvidenceCaveats] = useState('');
+  const scenarioDefaultsKeyRef = useRef<string>('');
   const queryClient = useQueryClient();
   const deleteProductMutation = useDeleteProduct();
   const { toast } = useToast();
@@ -438,7 +642,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const techniqueTacticMap = useMemo(() => {
     const map = new Map<string, string>();
     techniques.forEach((technique) => {
-      map.set(technique.id.toUpperCase(), technique.tactic);
+      const tactic = getPrimaryTactic(technique);
+      if (tactic) {
+        map.set(technique.id.toUpperCase(), tactic);
+      }
     });
     return map;
   }, []);
@@ -764,14 +971,6 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     setIsEvidenceDialogOpen(false);
   };
 
-  const ssmTechniqueIds = useMemo(() => {
-    const set = new Set<string>();
-    ssmCapabilities.forEach(cap => {
-      cap.mappings.forEach(mapping => set.add(mapping.techniqueId));
-    });
-    return Array.from(set);
-  }, [ssmCapabilities]);
-
   const allPlatforms = useMemo(() => {
     const combined = [
       ...(product.platforms || []),
@@ -780,25 +979,67 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     return normalizePlatformList(combined);
   }, [product.platforms, productData?.hybridSelectorValues]);
 
+  useEffect(() => {
+    const scenarioKey = `${productKey}|${productTitle}|${allPlatforms.join(',')}`;
+    if (scenarioDefaultsKeyRef.current === scenarioKey) return;
+    setScenarioAnswers(inferScenarioAnswers(productTitle, allPlatforms));
+    setScenarioFilterEnabled(false);
+    setScenarioShowAll(false);
+    setScenarioMaxTechniques(12);
+    setScenarioOverrideTechniqueIds(new Set());
+    scenarioDefaultsKeyRef.current = scenarioKey;
+  }, [allPlatforms, productKey, productTitle]);
+
+  const hasWizardGuidedCoverage = useMemo(
+    () => ssmCapabilities.some((capability) => {
+      const source = (capability.source || '').toLowerCase();
+      return source === 'wizard_questions' || source === 'wizard_telemetry';
+    }),
+    [ssmCapabilities]
+  );
+
+  const stixScopedCapabilities = useMemo(() => {
+    if (!hasWizardGuidedCoverage) return ssmCapabilities;
+    return ssmCapabilities.filter((capability) => {
+      const source = (capability.source || '').toLowerCase();
+      return source === 'wizard_questions' || source === 'wizard_telemetry';
+    });
+  }, [hasWizardGuidedCoverage, ssmCapabilities]);
+
+  const stixTechniqueIds = useMemo(() => {
+    const set = new Set<string>();
+    stixScopedCapabilities.forEach(cap => {
+      cap.mappings.forEach(mapping => set.add(mapping.techniqueId));
+    });
+    return Array.from(set);
+  }, [stixScopedCapabilities]);
+
+  // Wizard-guided coverage should show the full MITRE strategy/analytic content from the final wizard step.
+  // Avoid additional platform filtering here to prevent "Analytics (0)" regressions in tactic drilldown.
+  const stixMappingPlatforms = useMemo(
+    () => (hasWizardGuidedCoverage ? [] : allPlatforms),
+    [hasWizardGuidedCoverage, allPlatforms]
+  );
+
   const { data: ssmStixMapping } = useQuery<{
     detectionStrategies: StixDetectionStrategy[];
     dataComponents: StixDataComponent[];
     techniqueNames: Record<string, string>;
   }>({
-    queryKey: ['ssm-stix-mapping', productKey, ssmTechniqueIds.join('|'), allPlatforms.join('|')],
+    queryKey: ['ssm-stix-mapping', productKey, stixTechniqueIds.join('|'), stixMappingPlatforms.join('|')],
     queryFn: async () => {
       const res = await fetch('/api/mitre-stix/techniques/mapping', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          techniqueIds: ssmTechniqueIds,
-          platforms: allPlatforms.length > 0 ? allPlatforms : undefined,
+          techniqueIds: stixTechniqueIds,
+          platforms: stixMappingPlatforms.length > 0 ? stixMappingPlatforms : undefined,
         }),
       });
       if (!res.ok) throw new Error('Failed to fetch SSM technique mapping');
       return res.json();
     },
-    enabled: ssmTechniqueIds.length > 0,
+    enabled: stixTechniqueIds.length > 0,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -945,13 +1186,13 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       const remote = remoteTacticMap.get(normalized);
       if (remote && remote.length > 0) return remote[0];
       const direct = coverageTacticMap.get(normalized)
-        || techniqueIndex.get(normalized)?.tactic
+        || getPrimaryTactic(techniqueIndex.get(normalized))
         || techniqueTacticMap.get(normalized);
       if (direct) return direct;
       if (normalized.includes('.')) {
         const parentId = normalized.split('.')[0];
         return coverageTacticMap.get(parentId)
-          || techniqueIndex.get(parentId)?.tactic
+          || getPrimaryTactic(techniqueIndex.get(parentId))
           || techniqueTacticMap.get(parentId)
           || 'Unknown';
       }
@@ -973,6 +1214,18 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       return coverageDescriptionMap.get(normalized) || '';
     };
   }, [techniqueIndex, coverageDescriptionMap]);
+
+  const getFirstSentence = useMemo(() => {
+    return (value?: string | null) => {
+      const trimmed = (value || '').trim();
+      if (!trimmed) return '';
+      const match = trimmed.match(/^[^.!?]+[.!?]/);
+      if (match) return match[0].trim();
+      const firstLine = trimmed.split(/\r?\n/).find((line) => line.trim().length > 0);
+      if (firstLine) return firstLine.trim();
+      return trimmed;
+    };
+  }, []);
 
   const { data: mitreStats } = useQuery<{ techniques: number }>({
     queryKey: ['mitre-stix-stats'],
@@ -998,12 +1251,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   
   const strategies = useMemo(() => {
     return getHybridStrategies(
-      ssmCapabilities,
+      stixScopedCapabilities,
       ssmStixMapping?.detectionStrategies,
       getDetectionStrategiesForProduct(productKey),
-      allPlatforms
+      stixMappingPlatforms
     );
-  }, [ssmCapabilities, ssmStixMapping?.detectionStrategies, productKey, allPlatforms]);
+  }, [stixScopedCapabilities, ssmStixMapping?.detectionStrategies, productKey, stixMappingPlatforms]);
   const analyticById = useMemo(() => {
     const map = new Map<string, AnalyticItem>();
     strategies.forEach(strategy => {
@@ -1073,7 +1326,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       const evidence = resolveEvidenceForKey(target);
       if (!evidence) return;
       const dcName = evidence.dataComponentName
-        || dataComponents[evidence.dataComponentId]?.name
+        || (dataComponents as Record<string, any>)[evidence.dataComponentId]?.name
         || target;
       evidence.logSources.forEach((source) => {
         if (!source.notes) return;
@@ -1128,7 +1381,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       const evidence = resolveEvidenceForKey(dcKey);
       if (!evidence) return;
       const dcName = evidence.dataComponentName
-        || dataComponents[evidence.dataComponentId]?.name
+        || (dataComponents as Record<string, any>)[evidence.dataComponentId]?.name
         || dcKey;
       evidence.logSources.forEach((source) => {
         if (!source.name) return;
@@ -1150,14 +1403,14 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     const allPrefixes = platformsToUse.flatMap(p => getPlatformPrefixes(p));
 
     analytic.dataComponents.forEach((dcId: string) => {
-      const dc = dataComponents[dcId];
+      const dc = (dataComponents as Record<string, any>)[dcId];
       if (!dc) return;
 
       if (dc.logSources && dc.logSources.length > 0) {
-        const filteredSources = dc.logSources.filter(ls =>
+        const filteredSources = dc.logSources.filter((ls: any) =>
           allPrefixes.some(prefix => ls.name.toLowerCase().startsWith(prefix.toLowerCase()))
         );
-        filteredSources.forEach(ls => {
+        filteredSources.forEach((ls: any) => {
           rows.push({
             dataComponentId: dc.id,
             dataComponentName: dc.name,
@@ -1166,8 +1419,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           });
         });
       } else {
-        const platformMappings = dc.platforms.filter(p => platformMatchesAny([p.platform], platformsToUse));
-        platformMappings.forEach(mapping => {
+        const platformMappings = dc.platforms.filter((p: any) => platformMatchesAny([p.platform], platformsToUse));
+        platformMappings.forEach((mapping: any) => {
           rows.push({
             dataComponentId: dc.id,
             dataComponentName: dc.name,
@@ -1212,10 +1465,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     const rows: MutableElementRow[] = [];
 
     analytic.dataComponents.forEach((dcId: string) => {
-      const dc = dataComponents[dcId];
+      const dc = (dataComponents as Record<string, any>)[dcId];
       if (!dc) return;
 
-      dc.mutableElements.forEach(me => {
+      dc.mutableElements.forEach((me: any) => {
         if (!seen.has(me.name)) {
           seen.add(me.name);
           rows.push({
@@ -1413,7 +1666,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
 
   const renderHowToSection = (label: string, markdown: string) => {
     return (
-      <details className="bg-background p-3 rounded border border-border">
+      <details className="bg-background p-3 rounded">
         <summary className="cursor-pointer text-sm font-medium text-muted-foreground select-none">
           {label}
         </summary>
@@ -1460,9 +1713,11 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     const rows: MutableElementRow[] = [];
 
     analytic.dataComponents.forEach((dcId: string) => {
-      let dc = dataComponents[dcId];
+      let dc = (dataComponents as Record<string, any>)[dcId];
       if (!dc) {
-        const stixDc = stixDataComponents.find(item => item.id === dcId);
+        const stixDc = stixDataComponents.find(item =>
+          item.id === dcId || item.name.toLowerCase() === dcId.toLowerCase()
+        );
         if (stixDc) {
           const candidates = dataComponentsByName.get(stixDc.name.toLowerCase()) || [];
           dc = candidates.find(candidate =>
@@ -1470,10 +1725,14 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           ) || candidates[0];
         }
       }
+      if (!dc) {
+        const byNameCandidates = dataComponentsByName.get(dcId.toLowerCase()) || [];
+        dc = byNameCandidates[0];
+      }
 
       if (!dc) return;
 
-      dc.mutableElements.forEach(me => {
+      dc.mutableElements.forEach((me: any) => {
         if (!seen.has(me.name)) {
           seen.add(me.name);
           rows.push({
@@ -1487,9 +1746,403 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     return rows;
   };
 
+  const getMappedDataComponentsFromMetadata = (metadata: Record<string, unknown> | null): string[] => {
+    if (!metadata) return [];
+    const mapped = metadata.mapped_data_components ?? metadata.mappedDataComponents;
+    if (!Array.isArray(mapped)) return [];
+
+    const values = new Set<string>();
+    mapped.forEach((entry) => {
+      if (typeof entry !== 'string') return;
+      const raw = entry.trim();
+      if (!raw) return;
+      const idPrefix = raw.split(' - ')[0]?.trim();
+      const normalizedId = idPrefix?.toUpperCase();
+
+      if (normalizedId && (dataComponents as Record<string, any>)[normalizedId]) {
+        values.add(normalizedId);
+        return;
+      }
+      if ((dataComponents as Record<string, any>)[raw]) {
+        values.add(raw);
+        return;
+      }
+
+      const byName = dataComponentsByName.get(raw.toLowerCase()) || [];
+      if (byName.length > 0) {
+        byName.forEach((candidate) => values.add(candidate.id));
+        return;
+      }
+
+      values.add(raw);
+    });
+
+    return Array.from(values);
+  };
+
+  const resolveAnalyticDataComponents = (
+    analytic: AnalyticItem | StixAnalytic,
+    metadata: Record<string, unknown> | null
+  ): string[] => {
+    const fromAnalytic = Array.isArray((analytic as AnalyticItem).dataComponents)
+      ? ((analytic as AnalyticItem).dataComponents || [])
+      : Array.isArray((analytic as StixAnalytic).dataComponents)
+        ? ((analytic as StixAnalytic).dataComponents || [])
+        : [];
+
+    const merged = new Set<string>();
+    fromAnalytic.forEach((value) => {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        merged.add(value.trim());
+      }
+    });
+
+    getMappedDataComponentsFromMetadata(metadata).forEach((value) => {
+      if (value.trim().length > 0) merged.add(value.trim());
+    });
+
+    return Array.from(merged);
+  };
+
+  const selectedTechniqueFilter = useMemo(() => {
+    const set = new Set<string>();
+    selectedTechniqueIds.forEach((id) => {
+      const normalized = normalizeTechniqueId(id);
+      if (normalized) set.add(normalized);
+    });
+    return set;
+  }, [selectedTechniqueIds]);
+
+  const selectedDataComponentFilter = useMemo(() => {
+    const set = new Set<string>();
+    selectedDataComponentIds.forEach((id) => {
+      const normalized = normalizeDataComponentId(id);
+      if (normalized) set.add(normalized);
+    });
+    return set;
+  }, [selectedDataComponentIds]);
+
+  const hasTechniqueFilter = selectedTechniqueFilter.size > 0;
+  const hasDataComponentFilter = selectedDataComponentFilter.size > 0;
+
+  const toggleTechniqueFilter = (id: string) => {
+    const normalized = normalizeTechniqueId(id);
+    setSelectedTechniqueIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(normalized)) next.delete(normalized);
+      else next.add(normalized);
+      return next;
+    });
+  };
+
+  const toggleDataComponentFilter = (id: string) => {
+    const normalized = normalizeDataComponentId(id);
+    setSelectedDataComponentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(normalized)) next.delete(normalized);
+      else next.add(normalized);
+      return next;
+    });
+  };
+
+  const clearTechniqueFilters = () => {
+    setSelectedTechniqueIds(new Set());
+  };
+
+  const clearDataComponentFilters = () => {
+    setSelectedDataComponentIds(new Set());
+  };
+
+  const scenarioTechniqueInsights = useMemo(() => {
+    type Metric = {
+      strategyCount: number;
+      analyticCount: number;
+      dataComponents: Set<string>;
+      communityHits: number;
+    };
+
+    const metrics = new Map<string, Metric>();
+    const candidateTechniqueIds = new Set<string>();
+    const addCandidateTechnique = (techniqueId?: string | null) => {
+      if (!techniqueId) return;
+      const normalized = normalizeTechniqueId(techniqueId);
+      if (!/^T\d{4}(?:\.\d{3})?$/.test(normalized)) return;
+      candidateTechniqueIds.add(normalized);
+    };
+
+    const upsertMetric = (techniqueId: string): Metric => {
+      const normalized = normalizeTechniqueId(techniqueId);
+      const existing = metrics.get(normalized);
+      if (existing) return existing;
+      const created: Metric = {
+        strategyCount: 0,
+        analyticCount: 0,
+        dataComponents: new Set<string>(),
+        communityHits: 0,
+      };
+      metrics.set(normalized, created);
+      return created;
+    };
+
+    const ingestStrategies = (
+      strategyList: Array<{ techniques?: string[]; analytics?: Array<{ platforms?: string[]; dataComponents?: string[] }> }>,
+      isCommunity: boolean
+    ) => {
+      strategyList.forEach((strategy) => {
+        const techniquesForStrategy = Array.isArray(strategy.techniques) ? strategy.techniques : [];
+        if (techniquesForStrategy.length === 0) return;
+        const allAnalytics = Array.isArray(strategy.analytics) ? strategy.analytics : [];
+        const scopedAnalytics = allPlatforms.length > 0
+          ? allAnalytics.filter((analytic) => platformMatchesAny(analytic.platforms || [], allPlatforms))
+          : allAnalytics;
+        const scopedDataComponents = new Set<string>();
+        scopedAnalytics.forEach((analytic) => {
+          const dcList = Array.isArray(analytic.dataComponents) ? analytic.dataComponents : [];
+          dcList.forEach((dcId) => {
+            const normalized = normalizeDataComponentId(dcId);
+            if (normalized) scopedDataComponents.add(normalized);
+          });
+        });
+
+        techniquesForStrategy.forEach((techId) => {
+          addCandidateTechnique(techId);
+          const metric = upsertMetric(techId);
+          metric.strategyCount += 1;
+          metric.analyticCount += scopedAnalytics.length;
+          scopedDataComponents.forEach((dc) => metric.dataComponents.add(dc));
+          if (isCommunity) {
+            metric.communityHits += 1;
+          }
+        });
+      });
+    };
+
+    // Build a complete technique candidate pool first so weak strategy links do not
+    // exclude valid mapped techniques before scoring.
+    stixTechniqueIds.forEach(addCandidateTechnique);
+    Object.keys(ssmCoverage).forEach(addCandidateTechnique);
+    (coverageData?.coverage || []).forEach((row) => addCandidateTechnique(row.techniqueId));
+    (visibilityCoverageData?.coverage || []).forEach((row) => addCandidateTechnique(row.techniqueId));
+    autoMapping.enrichedMapping?.techniqueIds?.forEach(addCandidateTechnique);
+
+    candidateTechniqueIds.forEach((techniqueId) => {
+      upsertMetric(techniqueId);
+    });
+
+    ingestStrategies(
+      strategies.map((strategy) => ({
+        techniques: strategy.techniques || [],
+        analytics: strategy.analytics || [],
+      })),
+      false
+    );
+
+    if (autoMapping.enrichedMapping?.detectionStrategies) {
+      ingestStrategies(
+        autoMapping.enrichedMapping.detectionStrategies.map((strategy) => ({
+          techniques: strategy.techniques || [],
+          analytics: strategy.analytics || [],
+        })),
+        true
+      );
+    }
+
+    const metricValues = Array.from(metrics.values());
+    const maxStrategyCount = Math.max(1, ...metricValues.map((metric) => metric.strategyCount));
+    const maxAnalyticCount = Math.max(1, ...metricValues.map((metric) => metric.analyticCount));
+    const maxDataComponents = Math.max(1, ...metricValues.map((metric) => metric.dataComponents.size));
+
+    const excludedByReason: Record<ScenarioDropReason, string[]> = {
+      blackBox: [],
+      passThrough: [],
+      humanSurface: [],
+    };
+
+    const scoredEntries = Array.from(metrics.entries())
+      .map(([techniqueId, metric]) => {
+        const normalizedTechniqueId = normalizeTechniqueId(techniqueId);
+        const tactic = resolveTacticName(normalizedTechniqueId);
+        let dropReason = getScenarioDropReason(normalizedTechniqueId, tactic, scenarioAnswers);
+        if (dropReason && scenarioOverrideTechniqueIds.has(normalizedTechniqueId)) {
+          dropReason = null;
+        }
+        if (dropReason) {
+          excludedByReason[dropReason].push(techniqueId);
+        }
+
+        const strategyNorm = metric.strategyCount / maxStrategyCount;
+        const analyticNorm = metric.analyticCount / maxAnalyticCount;
+        const dcNorm = metric.dataComponents.size / maxDataComponents;
+        const baseScore = (0.4 * strategyNorm) + (0.3 * analyticNorm) + (0.3 * dcNorm);
+        const boostMultiplier = getScenarioBoostMultiplier(tactic, scenarioAnswers);
+        const finalScore = baseScore * boostMultiplier;
+
+        return {
+          techniqueId,
+          tactic,
+          baseScore,
+          boostMultiplier,
+          finalScore,
+          dropped: dropReason,
+        };
+      });
+
+    const priorityTechniqueIds = new Set<string>();
+    if (hasWizardGuidedCoverage) {
+      stixTechniqueIds.forEach((id) => priorityTechniqueIds.add(normalizeTechniqueId(id)));
+      (autoMapping.enrichedMapping?.techniqueIds || []).forEach((id) => priorityTechniqueIds.add(normalizeTechniqueId(id)));
+    }
+
+    const ranked = [...scoredEntries]
+      .filter((entry) => (scenarioFilterEnabled ? !entry.dropped : true))
+      .sort((a, b) => {
+        if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
+        return a.techniqueId.localeCompare(b.techniqueId);
+      });
+
+    const rankedPriorityTechniqueIds = ranked
+      .map((entry) => entry.techniqueId)
+      .filter((techniqueId) => priorityTechniqueIds.has(techniqueId));
+    const rankedNonPriorityTechniqueIds = ranked
+      .map((entry) => entry.techniqueId)
+      .filter((techniqueId) => !priorityTechniqueIds.has(techniqueId));
+    const rankedTechniqueIds = [...rankedPriorityTechniqueIds, ...rankedNonPriorityTechniqueIds];
+    const limitedTechniqueIds = scenarioFilterEnabled && !scenarioShowAll
+      ? (() => {
+          const limit = Math.max(1, scenarioMaxTechniques);
+          const seeded = rankedPriorityTechniqueIds.slice(0, limit);
+          for (const techniqueId of rankedNonPriorityTechniqueIds) {
+            if (seeded.length >= limit) break;
+            seeded.push(techniqueId);
+          }
+          return seeded;
+        })()
+      : rankedTechniqueIds;
+    const allowedSet = new Set<string>(scenarioFilterEnabled ? limitedTechniqueIds : rankedTechniqueIds);
+    const rankByTechnique = new Map<string, number>();
+    rankedTechniqueIds.forEach((id, index) => rankByTechnique.set(id, index));
+
+    return {
+      allowedSet,
+      rankByTechnique,
+      excludedByReason,
+      totalCandidates: metrics.size,
+      scoredEntries: [...scoredEntries].sort((a, b) => {
+        if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
+        return a.techniqueId.localeCompare(b.techniqueId);
+      }),
+    };
+  }, [
+    autoMapping.enrichedMapping?.techniqueIds,
+    allPlatforms,
+    autoMapping.enrichedMapping?.detectionStrategies,
+    coverageData?.coverage,
+    hasWizardGuidedCoverage,
+    resolveTacticName,
+    scenarioAnswers,
+    scenarioFilterEnabled,
+    scenarioMaxTechniques,
+    scenarioOverrideTechniqueIds,
+    scenarioShowAll,
+    ssmCoverage,
+    strategies,
+    stixTechniqueIds,
+    visibilityCoverageData?.coverage,
+  ]);
+
+  const scenarioExcludedCounts = useMemo(() => ({
+    blackBox: scenarioTechniqueInsights.excludedByReason.blackBox.length,
+    passThrough: scenarioTechniqueInsights.excludedByReason.passThrough.length,
+    humanSurface: scenarioTechniqueInsights.excludedByReason.humanSurface.length,
+  }), [scenarioTechniqueInsights.excludedByReason]);
+
+  const totalScenarioExcluded = useMemo(() => (
+    scenarioExcludedCounts.blackBox
+    + scenarioExcludedCounts.passThrough
+    + scenarioExcludedCounts.humanSurface
+  ), [scenarioExcludedCounts.blackBox, scenarioExcludedCounts.humanSurface, scenarioExcludedCounts.passThrough]);
+
+  const updateScenarioAnswer = (key: ScenarioQuestionKey, checked: boolean) => {
+    setScenarioAnswers((prev) => ({ ...prev, [key]: checked }));
+  };
+
+  const toggleScenarioOverrideTechnique = (techniqueId: string) => {
+    const normalized = normalizeTechniqueId(techniqueId);
+    setScenarioOverrideTechniqueIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(normalized)) {
+        next.delete(normalized);
+      } else {
+        next.add(normalized);
+      }
+      return next;
+    });
+  };
+
+  const clearScenarioOverrides = () => {
+    setScenarioOverrideTechniqueIds(new Set());
+  };
+
+  const humanSurfaceExcludedTechniques = useMemo(() => {
+    return [...scenarioTechniqueInsights.excludedByReason.humanSurface].sort((a, b) => a.localeCompare(b));
+  }, [scenarioTechniqueInsights.excludedByReason.humanSurface]);
+
+  const filteredVerifiedEvidence = useMemo(() => {
+    if (!hasDataComponentFilter) return verifiedEvidence;
+    return verifiedEvidence.filter((entry) => {
+      const idMatch = selectedDataComponentFilter.has(entry.dataComponentId.toLowerCase());
+      const nameMatch = entry.dataComponentName
+        ? selectedDataComponentFilter.has(entry.dataComponentName.toLowerCase())
+        : false;
+      return idMatch || nameMatch;
+    });
+  }, [verifiedEvidence, hasDataComponentFilter, selectedDataComponentFilter]);
+
+  const focusTechnique = (techniqueId: string, tacticHint?: string) => {
+    const tacticValue = tacticHint || resolveTacticName(techniqueId);
+    if (!tacticValue || tacticValue === 'Unknown') return;
+    const tactic = tacticValue.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const element = document.getElementById(`ctid-tactic-${tactic}`);
+    if (element) {
+      element.scrollIntoView({ behavior: 'smooth' });
+      setExpandedTactics(prev => new Set(prev).add(`ctid-tactic-${tactic}`));
+      setExpandedTechniques(prev => new Set(prev).add(`ctid-tech-${techniqueId}`));
+    }
+  };
+
   const filteredStrategies = useMemo(() => {
-    return strategies;
-  }, [strategies]);
+    if (!scenarioFilterEnabled && !hasTechniqueFilter && !hasDataComponentFilter) return strategies;
+    return strategies
+      .map((strategy) => {
+        const strategyTechniques = Array.isArray(strategy.techniques) ? strategy.techniques : [];
+        const strategyAnalytics = Array.isArray(strategy.analytics) ? strategy.analytics : [];
+        const scenarioTechniques = scenarioFilterEnabled
+          ? strategyTechniques.filter((techId) => scenarioTechniqueInsights.allowedSet.has(normalizeTechniqueId(techId)))
+          : strategyTechniques;
+        const filteredTechniques = hasTechniqueFilter
+          ? scenarioTechniques.filter((techId) => selectedTechniqueFilter.has(normalizeTechniqueId(techId)))
+          : scenarioTechniques;
+        const filteredAnalytics = hasDataComponentFilter
+          ? strategyAnalytics.filter((analytic) =>
+              Array.isArray(analytic.dataComponents)
+                && analytic.dataComponents.some((dcId) => selectedDataComponentFilter.has(normalizeDataComponentId(dcId)))
+            )
+          : strategyAnalytics;
+        if (scenarioFilterEnabled && filteredTechniques.length === 0) return null;
+        if (hasTechniqueFilter && filteredTechniques.length === 0) return null;
+        if (hasDataComponentFilter && filteredAnalytics.length === 0) return null;
+        return { ...strategy, techniques: filteredTechniques, analytics: filteredAnalytics };
+      })
+      .filter(Boolean) as DetectionStrategy[];
+  }, [
+    hasDataComponentFilter,
+    hasTechniqueFilter,
+    scenarioFilterEnabled,
+    scenarioTechniqueInsights.allowedSet,
+    selectedDataComponentFilter,
+    selectedTechniqueFilter,
+    strategies,
+  ]);
 
   const totalAnalytics = useMemo(() => {
     return filteredStrategies.reduce((sum, s) => sum + s.analytics.length, 0);
@@ -1634,10 +2287,40 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     })).sort((a, b) => a.id.localeCompare(b.id));
   }, [visibilityCoverageData?.coverage, ssmCoverage, autoMapping.enrichedMapping?.techniqueIds, getTechniqueName, getTechniqueTactic, resolveTechniqueDescription, resolveTacticName]);
 
+  const visibleTechniqueChips = useMemo(() => {
+    let filtered = visibilityTechniques;
+    if (scenarioFilterEnabled) {
+      filtered = filtered.filter((tech) => scenarioTechniqueInsights.allowedSet.has(normalizeTechniqueId(tech.id)));
+    }
+    if (hasTechniqueFilter) {
+      filtered = filtered.filter((tech) => selectedTechniqueFilter.has(normalizeTechniqueId(tech.id)));
+    }
+    if (!scenarioFilterEnabled) {
+      return filtered;
+    }
+    return [...filtered].sort((a, b) => {
+      const aRank = scenarioTechniqueInsights.rankByTechnique.get(normalizeTechniqueId(a.id));
+      const bRank = scenarioTechniqueInsights.rankByTechnique.get(normalizeTechniqueId(b.id));
+      if (aRank !== undefined && bRank !== undefined && aRank !== bRank) return aRank - bRank;
+      if (aRank !== undefined && bRank === undefined) return -1;
+      if (aRank === undefined && bRank !== undefined) return 1;
+      return a.id.localeCompare(b.id);
+    });
+  }, [
+    hasTechniqueFilter,
+    scenarioFilterEnabled,
+    scenarioTechniqueInsights.allowedSet,
+    scenarioTechniqueInsights.rankByTechnique,
+    selectedTechniqueFilter,
+    visibilityTechniques,
+  ]);
+
   const mappedTechniqueStats = useMemo(() => {
     const mappedIds = new Set<string>();
-    if (ssmTechniqueIds.length > 0) {
-      ssmTechniqueIds.forEach(id => mappedIds.add(id));
+    if (scenarioFilterEnabled) {
+      scenarioTechniqueInsights.allowedSet.forEach((id) => mappedIds.add(id));
+    } else if (stixTechniqueIds.length > 0) {
+      stixTechniqueIds.forEach(id => mappedIds.add(id));
     } else if (visibilityTechniques.length > 0) {
       visibilityTechniques.forEach(tech => mappedIds.add(tech.id));
     } else if (detectionTechniques.length > 0) {
@@ -1656,7 +2339,14 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     });
 
     return { total: mappedIds.size, withCommunity };
-  }, [ssmTechniqueIds, visibilityTechniques, detectionTechniques, techniqueSources]);
+  }, [
+    detectionTechniques,
+    scenarioFilterEnabled,
+    scenarioTechniqueInsights.allowedSet,
+    stixTechniqueIds,
+    techniqueSources,
+    visibilityTechniques,
+  ]);
 
   const getSourcesForStrategy = useMemo(() => {
     return (strategy: { techniques: string[] }): ResourceType[] => {
@@ -1678,21 +2368,53 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     if (!autoMapping.enrichedMapping?.detectionStrategies) return [];
     const hasTechniqueSources = Object.keys(techniqueSources).length > 0;
 
-    return autoMapping.enrichedMapping.detectionStrategies.map(strategy => ({
-      ...strategy,
-      // Filter analytics by platform, but keep the strategy even if analytics become empty
-      analytics: strategy.analytics.filter(a =>
-        platformMatchesAny(a.platforms, allPlatforms)
-      )
-    })).filter(s => {
-      // Filter by source (e.g. Sigma, Splunk) if filters are active
-      if (!hasTechniqueSources) return true;
-      const strategySources = getSourcesForStrategy(s);
-      // If the strategy has no sources (shouldn't happen for auto-mapped items), keep it
-      if (strategySources.length === 0) return true;
-      return strategySources.some(src => sourceFilters.has(src));
-    });
-  }, [autoMapping.enrichedMapping?.detectionStrategies, allPlatforms, sourceFilters, techniqueSources, getSourcesForStrategy]);
+    return autoMapping.enrichedMapping.detectionStrategies
+      .map(strategy => {
+        const baseAnalytics = strategy.analytics.filter(a =>
+          platformMatchesAny(a.platforms, allPlatforms)
+        );
+        const scenarioTechniques = scenarioFilterEnabled
+          ? strategy.techniques.filter((techId) => scenarioTechniqueInsights.allowedSet.has(normalizeTechniqueId(techId)))
+          : strategy.techniques;
+        const filteredTechniques = hasTechniqueFilter
+          ? scenarioTechniques.filter((techId) => selectedTechniqueFilter.has(normalizeTechniqueId(techId)))
+          : scenarioTechniques;
+        const filteredAnalytics = hasDataComponentFilter
+          ? baseAnalytics.filter((analytic) =>
+              Array.isArray(analytic.dataComponents)
+                && analytic.dataComponents.some((dcId) => selectedDataComponentFilter.has(normalizeDataComponentId(dcId)))
+            )
+          : baseAnalytics;
+        return {
+          ...strategy,
+          techniques: filteredTechniques,
+          analytics: filteredAnalytics,
+        };
+      })
+      .filter(s => {
+        if (scenarioFilterEnabled && s.techniques.length === 0) return false;
+        if (hasTechniqueFilter && s.techniques.length === 0) return false;
+        if (hasDataComponentFilter && s.analytics.length === 0) return false;
+        // Filter by source (e.g. Sigma, Splunk) if filters are active
+        if (!hasTechniqueSources) return true;
+        const strategySources = getSourcesForStrategy(s);
+        // If the strategy has no sources (shouldn't happen for auto-mapped items), keep it
+        if (strategySources.length === 0) return true;
+        return strategySources.some(src => sourceFilters.has(src));
+      });
+  }, [
+    autoMapping.enrichedMapping?.detectionStrategies,
+    allPlatforms,
+    sourceFilters,
+    techniqueSources,
+    getSourcesForStrategy,
+    hasTechniqueFilter,
+    hasDataComponentFilter,
+    scenarioFilterEnabled,
+    scenarioTechniqueInsights.allowedSet,
+    selectedTechniqueFilter,
+    selectedDataComponentFilter,
+  ]);
 
   const tacticCandidateIds = useMemo(() => {
     const ids = new Set<string>();
@@ -1722,7 +2444,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     const missing: string[] = [];
     const hasKnownTactic = (id: string) => {
       const direct = coverageTacticMap.get(id)
-        || techniqueIndex.get(id)?.tactic
+        || getPrimaryTactic(techniqueIndex.get(id))
         || techniqueTacticMap.get(id)
         || remoteTacticMap.get(id)?.[0];
       if (direct) return true;
@@ -1730,7 +2452,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       const parentId = id.split('.')[0];
       return Boolean(
         coverageTacticMap.get(parentId)
-          || techniqueIndex.get(parentId)?.tactic
+          || getPrimaryTactic(techniqueIndex.get(parentId))
           || techniqueTacticMap.get(parentId)
           || remoteTacticMap.get(parentId)?.[0]
       );
@@ -1799,12 +2521,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   }, [detectionTechniques.length, mitreStats?.techniques]);
 
   const overviewTechniqueCount = useMemo(() => {
-    if (visibilityTechniques.length > 0) return visibilityTechniques.length;
-    if (detectionTechniques.length > 0) return detectionTechniques.length;
-    if (ssmTechniqueIds.length > 0) return ssmTechniqueIds.length;
-    const fallbackCount = Object.keys(techniqueSources).length;
-    return fallbackCount;
-  }, [visibilityTechniques.length, detectionTechniques.length, ssmTechniqueIds.length, techniqueSources]);
+    return visibleTechniqueChips.length;
+  }, [visibleTechniqueChips.length]);
 
   const visibilityCoverageScore = useMemo(() => {
     const totalTechniques = mitreStats?.techniques || techniques.length || 1;
@@ -1954,7 +2672,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         const strategyKey = `${sectionKey}-strategy-${strategy.id}`;
         const isStrategyExpanded = expandedStrategies.has(strategyKey);
         return (
-          <div key={strategyKey} className="border border-border rounded-lg overflow-hidden bg-card">
+          <div key={strategyKey} className="rounded-lg overflow-hidden bg-card">
             <button
               onClick={() => toggleStrategy(strategyKey)}
               className="w-full px-4 py-4 text-left flex items-center gap-4 hover:bg-muted/50 transition-colors"
@@ -1997,28 +2715,42 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                       const overrideLogSources = getLogSourcesFromMetadata(strategyMetadata);
                       const overrideMutableElements = getMutableElementsFromMetadata(strategyMetadata);
                       const metadataQuery = getQueryFromMetadata(strategyMetadata);
-                      const analyticDcIds = Array.isArray((analytic as AnalyticItem).dataComponents)
-                        ? (analytic as AnalyticItem).dataComponents
-                        : Array.isArray((analytic as StixAnalytic).dataComponents)
-                          ? (analytic as StixAnalytic).dataComponents
-                          : [];
+                      const analyticDcIds = resolveAnalyticDataComponents(analytic, strategyMetadata);
                       const logSources = overrideLogSources.length > 0
                         ? mergeVendorLogSources(overrideLogSources, analyticDcIds)
                         : (isStixAnalytic(analytic)
-                          ? getLogSourcesForStixAnalytic(analytic)
+                          ? (() => {
+                              const stixRows = getLogSourcesForStixAnalytic(analytic);
+                              if (stixRows.length > 0) return stixRows;
+                              return mergeVendorLogSources([], analyticDcIds);
+                            })()
                           : getLogSourcesForAnalytic(analytic));
                       const enablementNotes = getEnablementNotes(analyticDcIds, logSources);
-                      const mutableElements = overrideMutableElements.length > 0
+                      const mutableElementsFromAnalytic = overrideMutableElements.length > 0
                         ? overrideMutableElements
                         : (isStixAnalytic(analytic)
                           ? getMutableElementsForStixAnalytic(analytic)
                           : getMutableElementsForAnalytic(analytic));
+                      const mutableElements = mutableElementsFromAnalytic.length > 0
+                        ? mutableElementsFromAnalytic
+                        : getMutableElementsForCommunityAnalytic(
+                            {
+                              id: analytic.id,
+                              name: analytic.name,
+                              description: analytic.description,
+                              dataComponents: analyticDcIds,
+                              platforms: Array.isArray((analytic as StixAnalytic).platforms)
+                                ? (analytic as StixAnalytic).platforms
+                                : [],
+                            } as AnalyticItem,
+                            ssmStixMapping?.dataComponents || []
+                          );
                       const showMutableValues = mutableElements.some((element) =>
                         typeof element.value === 'string' && element.value.trim().length > 0
                       );
 
                       return (
-                        <div key={analyticKey} className="border border-border rounded-md overflow-hidden bg-background">
+                        <div key={analyticKey} className="rounded-md overflow-hidden bg-background">
                           <button
                             onClick={() => toggleAnalytic(analyticKey)}
                             className="w-full px-4 py-3 text-left flex items-center gap-3 hover:bg-muted/30 transition-colors"
@@ -2037,10 +2769,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                           </button>
 
                           {isAnalyticExpanded && (
-                            <div className="px-4 pb-4 pt-2 border-t border-border space-y-5">
+                            <div className="px-4 pb-4 pt-2 space-y-5">
                               <div>
                                 <h5 className="text-sm font-medium text-muted-foreground mb-2">Description</h5>
-                                <p className="text-sm text-foreground">{analytic.description}</p>
+                                <p className="text-sm text-foreground">
+                                  {getFirstSentence(analytic.description)}
+                                </p>
                               </div>
 
                               {strategy.techniques.length > 0 && (
@@ -2060,8 +2794,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                               rel="noopener noreferrer"
                                               title={techniqueDescription || undefined}
                                             >
-                                              <Badge variant="outline" className="text-xs hover:bg-muted/50 transition-colors">
-                                                <code className="text-red-600 mr-1">{techId}</code>
+                                              <Badge variant="secondary" className="text-xs font-mono hover:bg-muted/70 transition-colors">
+                                                <span className="text-red-600 mr-1">{techId}</span>
                                                 <ExternalLink className="w-3 h-3 text-muted-foreground" />
                                               </Badge>
                                             </a>
@@ -2085,40 +2819,46 @@ export function ProductView({ product, onBack }: ProductViewProps) {
 
                               <div>
                                 <h5 className="text-sm font-medium text-muted-foreground mb-2">Log Sources</h5>
-                                <div className="border border-border rounded-md overflow-hidden">
-                                  <table className="w-full text-sm">
-                                    <thead className="bg-muted/50">
-                                      <tr>
-                                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Data Component</th>
-                                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Name</th>
-                                        <th className="text-left px-3 py-2 font-medium text-muted-foreground">Channel</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-border">
-                                      {logSources.map((row, idx) => (
-                                        <tr key={`${row.dataComponentId}-${idx}`}>
-                                          <td className="px-3 py-2">
-                                            <button
-                                              onClick={() => {
-                                                const dc = dataComponents[row.dataComponentId];
-                                                if (dc) setSelectedDataComponent(dc);
-                                              }}
-                                              className="text-primary hover:underline text-left"
-                                              data-testid={`button-view-dc-${row.dataComponentId}`}
-                                            >
-                                              {row.dataComponentName}
-                                              <span className="text-muted-foreground ml-1">({row.dataComponentId})</span>
-                                          </button>
-                                        </td>
-                                        <td className="px-3 py-2 font-mono text-foreground">{row.logSourceName}</td>
-                                        <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{formatChannel(row.channel)}</td>
-                                      </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
+                                {logSources.length > 0 ? (
+                                  <div className="rounded-md overflow-hidden border border-border keep-border">
+                                    <table className="w-full text-sm">
+                                      <thead className="bg-muted/50">
+                                        <tr>
+                                          <th className="text-left px-3 py-2 font-medium text-muted-foreground">Data Component</th>
+                                          <th className="text-left px-3 py-2 font-medium text-muted-foreground">Name</th>
+                                          <th className="text-left px-3 py-2 font-medium text-muted-foreground">Channel</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody className="divide-y divide-border">
+                                        {logSources.map((row, idx) => (
+                                          <tr key={`${row.dataComponentId}-${idx}`}>
+                                            <td className="px-3 py-2">
+                                              <button
+                                                onClick={() => {
+                                                  const dc = (dataComponents as Record<string, any>)[row.dataComponentId];
+                                                  if (dc) setSelectedDataComponent(dc);
+                                                }}
+                                                className="text-primary hover:underline text-left"
+                                                data-testid={`button-view-dc-${row.dataComponentId}`}
+                                              >
+                                                {row.dataComponentName}
+                                                <span className="text-muted-foreground ml-1">({row.dataComponentId})</span>
+                                              </button>
+                                            </td>
+                                            <td className="px-3 py-2 font-mono text-foreground">{row.logSourceName}</td>
+                                            <td className="px-3 py-2 font-mono text-xs text-muted-foreground">{formatChannel(row.channel)}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                ) : (
+                                  <div className="rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-muted-foreground">
+                                    No log sources found for this analytic yet.
+                                  </div>
+                                )}
                                 {enablementNotes.length > 0 && (
-                                  <details className="mt-3 rounded-md border border-border bg-background/60 p-3 text-xs">
+                                  <details className="mt-3 rounded-md bg-background/60 p-3 text-xs">
                                     <summary className="cursor-pointer font-medium text-muted-foreground select-none">
                                       Enablement notes
                                     </summary>
@@ -2136,10 +2876,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                 )}
                               </div>
 
-                              {mutableElements.length > 0 && (
-                                <div>
-                                  <h5 className="text-sm font-medium text-muted-foreground mb-2">Mutable Elements</h5>
-                                  <div className="border border-border rounded-md overflow-hidden">
+                              <div>
+                                <h5 className="text-sm font-medium text-muted-foreground mb-2">Mutable Elements</h5>
+                                {mutableElements.length > 0 ? (
+                                  <div className="rounded-md overflow-hidden border border-border keep-border">
                                     <table className="w-full text-sm">
                                       <thead className="bg-muted/50">
                                         <tr>
@@ -2165,13 +2905,17 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                       </tbody>
                                     </table>
                                   </div>
-                                </div>
-                              )}
+                                ) : (
+                                  <div className="rounded-md border border-border bg-background/60 px-3 py-2 text-sm text-muted-foreground">
+                                    No mutable elements found for this analytic yet.
+                                  </div>
+                                )}
+                              </div>
 
                               {metadataQuery && (
                                 <div>
                                   <h5 className="text-sm font-medium text-muted-foreground mb-2">Analytic Logic</h5>
-                                  <pre className="text-xs bg-muted/40 border border-border rounded-md p-3 overflow-x-auto">
+                                  <pre className="text-xs bg-muted/40 rounded-md p-3 overflow-x-auto">
                                     <code className="font-mono text-foreground">{metadataQuery}</code>
                                   </pre>
                                 </div>
@@ -2225,7 +2969,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         ]));
 
         return (
-          <div key={strategyKey} className="border border-border rounded-lg overflow-hidden bg-card">
+          <div key={strategyKey} className="rounded-lg overflow-hidden bg-card">
             <button
               onClick={() => toggleStrategy(strategyKey)}
               className="w-full px-4 py-4 text-left flex items-center gap-4 hover:bg-muted/50 transition-colors"
@@ -2319,7 +3063,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                       const hasCtidData = ctidAnalytics.length > 0;
 
                       return (
-                        <div key={analyticKey} className="border border-border rounded-md overflow-hidden bg-background">
+                        <div key={analyticKey} className="rounded-md overflow-hidden bg-background">
                           <button
                             onClick={() => toggleAnalytic(analyticKey)}
                             className="w-full px-4 py-3 text-left flex items-center gap-3 hover:bg-muted/30 transition-colors"
@@ -2358,10 +3102,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                           </button>
 
                           {isAnalyticExpanded && (
-                            <div className="px-4 pb-4 pt-2 border-t border-border space-y-5">
+                            <div className="px-4 pb-4 pt-2 space-y-5">
                               <div>
                                 <h5 className="text-sm font-medium text-muted-foreground mb-2">Description</h5>
-                                <p className="text-sm text-foreground">{analytic.description}</p>
+                                <p className="text-sm text-foreground">
+                                  {getFirstSentence(analytic.description)}
+                                </p>
                               </div>
 
                               {strategy.techniques.length > 0 && (
@@ -2378,8 +3124,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                           rel="noopener noreferrer"
                                           title={techniqueDescription || undefined}
                                         >
-                                          <Badge variant="outline" className="text-xs hover:bg-muted/50 transition-colors">
-                                            <code className="text-red-600 mr-1">{techId}</code>
+                                          <Badge variant="secondary" className="text-xs font-mono hover:bg-muted/70 transition-colors">
+                                            <span className="text-red-600 mr-1">{techId}</span>
                                             <ExternalLink className="w-3 h-3 text-muted-foreground" />
                                           </Badge>
                                         </a>
@@ -2393,7 +3139,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                               {uniqueLogSources.length > 0 && (
                                 <div>
                                   <h5 className="text-sm font-medium text-muted-foreground mb-2">Log Sources</h5>
-                                  <div className="border border-border rounded-md overflow-hidden">
+                                  <div className="rounded-md overflow-hidden border border-border keep-border">
                                     <table className="w-full text-sm">
                                       <thead className="bg-muted/50">
                                         <tr>
@@ -2408,7 +3154,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                             <td className="px-3 py-2">
                                               <button
                                                 onClick={() => {
-                                                  const dc = dataComponents[row.dataComponentId];
+                                                  const dc = (dataComponents as Record<string, any>)[row.dataComponentId];
                                                   if (dc) setSelectedDataComponent(dc);
                                                 }}
                                                 className="text-primary hover:underline text-left"
@@ -2426,7 +3172,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                     </table>
                                   </div>
                                   {enablementNotes.length > 0 && (
-                                    <details className="mt-3 rounded-md border border-border bg-background/60 p-3 text-xs">
+                                    <details className="mt-3 rounded-md bg-background/60 p-3 text-xs">
                                       <summary className="cursor-pointer font-medium text-muted-foreground select-none">
                                         Enablement notes
                                       </summary>
@@ -2449,7 +3195,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                 <h5 className="text-sm font-medium text-muted-foreground mb-2 flex items-center gap-2">
                                   Mutable Elements
                                 </h5>
-                                <div className="border border-border rounded-md overflow-hidden">
+                                <div className="rounded-md overflow-hidden border border-border keep-border">
                                   <table className="w-full text-sm">
                                     <thead className="bg-muted/50">
                                       <tr>
@@ -2557,10 +3303,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       techniques: Array<{
         id: string;
         name: string;
+        description?: string;
         strategies: Array<{ id: string; name: string; description: string; techniques: string[]; analytics: AnalyticItem[] | StixAnalytic[] }>;
         subtechniques: Array<{
           id: string;
           name: string;
+          description?: string;
           strategies: Array<{ id: string; name: string; description: string; techniques: string[]; analytics: AnalyticItem[] | StixAnalytic[] }>;
         }>;
       }>;
@@ -2580,6 +3328,9 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           const tacticStrategyCount = tactic.techniques.reduce((sum, technique) => (
             sum + technique.strategies.length + technique.subtechniques.reduce((subSum, sub) => subSum + sub.strategies.length, 0)
           ), 0);
+          const tacticSubtechniqueCount = tactic.techniques.reduce((sum, technique) => (
+            sum + technique.subtechniques.length
+          ), 0);
           const tacticAnalyticsCount = tactic.techniques.reduce((sum, technique) => (
             sum
             + getAnalyticsCount(technique.strategies)
@@ -2587,7 +3338,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           ), 0);
 
           return (
-            <div key={tacticKey} className="border border-border rounded-lg overflow-hidden bg-card">
+            <div key={tacticKey} className="rounded-lg overflow-hidden bg-card">
               <button
                 onClick={() => toggleTactic(tacticKey)}
                 className="w-full px-4 py-4 text-left flex items-center gap-4 hover:bg-muted/50 transition-colors"
@@ -2603,6 +3354,11 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                 </div>
                 {!isTacticExpanded && (
                   <div className="flex items-center gap-2 flex-shrink-0">
+                    {tacticSubtechniqueCount > 0 && (
+                      <Badge variant="secondary" className="text-xs bg-destructive text-destructive-foreground">
+                        {tacticSubtechniqueCount} Techniques
+                      </Badge>
+                    )}
                     <Badge variant="secondary" className="text-xs">
                       {tacticStrategyCount} Strategies
                     </Badge>
@@ -2622,11 +3378,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                       const techniqueKey = `${sectionKey}-tech-${technique.id}`;
                       const isTechniqueExpanded = expandedTechniques.has(techniqueKey);
                       const techniqueStrategyCount = technique.strategies.length + technique.subtechniques.reduce((sum, sub) => sum + sub.strategies.length, 0);
+                      const techniqueSubtechniqueCount = technique.subtechniques.length;
                       const techniqueAnalyticsCount = getAnalyticsCount(technique.strategies)
                         + technique.subtechniques.reduce((sum, sub) => sum + getAnalyticsCount(sub.strategies), 0);
 
                       return (
-                        <div key={techniqueKey} className="border border-border rounded-md overflow-hidden bg-background">
+                        <div key={techniqueKey} className="rounded-md overflow-hidden bg-background">
                           <button
                             onClick={() => toggleTechnique(techniqueKey)}
                             className="w-full px-4 py-3 text-left flex items-center gap-3 hover:bg-muted/30 transition-colors"
@@ -2643,12 +3400,17 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                               </div>
                               {technique.description && (
                                 <p className="text-xs text-muted-foreground mt-1">
-                                  {technique.description}
+                                  {getFirstSentence(technique.description)}
                                 </p>
                               )}
                             </div>
                             {!isTechniqueExpanded && (
                               <div className="flex items-center gap-2 flex-shrink-0">
+                                {techniqueSubtechniqueCount > 0 && (
+                                  <Badge variant="secondary" className="text-xs bg-destructive text-destructive-foreground">
+                                    {techniqueSubtechniqueCount} Sub-Techniques
+                                  </Badge>
+                                )}
                                 <Badge variant="secondary" className="text-xs">
                                   {techniqueStrategyCount} Strategies
                                 </Badge>
@@ -2678,7 +3440,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                       const subtechAnalyticsCount = getAnalyticsCount(subtechnique.strategies);
 
                                       return (
-                                        <div key={subtechKey} className="border border-border rounded-md overflow-hidden bg-card">
+                                        <div key={subtechKey} className="rounded-md overflow-hidden bg-card">
                                           <button
                                             onClick={() => toggleSubtechnique(subtechKey)}
                                             className="w-full px-4 py-3 text-left flex items-center gap-3 hover:bg-muted/30 transition-colors"
@@ -2695,7 +3457,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                               </div>
                                               {subtechnique.description && (
                                                 <p className="text-xs text-muted-foreground mt-1">
-                                                  {subtechnique.description}
+                                                  {getFirstSentence(subtechnique.description)}
                                                 </p>
                                               )}
                                             </div>
@@ -2752,21 +3514,21 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const mappedDataComponents = useMemo(() => {
     // Start with static data components
     const staticDCs = product.dataComponentIds
-      .map(id => dataComponents[id])
+      .map(id => (dataComponents as Record<string, any>)[id])
       .filter(Boolean);
-    
+
     // Add dynamic data components from auto-mapping
     const dynamicDCs = autoMapping.enrichedMapping?.dataComponents || [];
-    
+
     // Combine and deduplicate by ID
     const combined = [...staticDCs];
-    
+
     dynamicDCs.forEach(dc => {
       // Skip if already present by ID
       if (combined.some(existing => existing.id === dc.id)) return;
-      
+
       // Check if we have static metadata for this ID (now that IDs match)
-      const staticMeta = dataComponents[dc.id];
+      const staticMeta = (dataComponents as Record<string, any>)[dc.id];
       
       if (staticMeta) {
         combined.push(staticMeta);
@@ -2785,12 +3547,300 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     return combined;
   }, [product.dataComponentIds, autoMapping.enrichedMapping?.dataComponents]);
 
+  const visibleMappedDataComponents = useMemo(() => {
+    if (!hasDataComponentFilter) return mappedDataComponents;
+    return mappedDataComponents.filter((dc) => selectedDataComponentFilter.has(normalizeDataComponentId(dc.id)));
+  }, [mappedDataComponents, hasDataComponentFilter, selectedDataComponentFilter]);
+
+  const stixAnalyticsForExport = useMemo(() => {
+    return filteredStrategies.flatMap((strategy) =>
+      strategy.analytics.map((analytic) => ({
+        strategyId: strategy.id,
+        strategyName: strategy.name,
+        analyticId: analytic.id,
+        analyticName: analytic.name,
+        platforms: Array.isArray((analytic as { platforms?: string[] }).platforms) ? (analytic as { platforms?: string[] }).platforms || [] : [],
+        dataComponents: Array.isArray((analytic as { dataComponents?: string[] }).dataComponents) ? (analytic as { dataComponents?: string[] }).dataComponents || [] : [],
+      }))
+    );
+  }, [filteredStrategies]);
+
+  const communityAnalyticsForExport = useMemo(() => {
+    return filteredCommunityStrategies.flatMap((strategy) =>
+      strategy.analytics.map((analytic) => ({
+        strategyId: strategy.id,
+        strategyName: strategy.name,
+        analyticId: analytic.id,
+        analyticName: analytic.name,
+        platforms: Array.isArray((analytic as { platforms?: string[] }).platforms) ? (analytic as { platforms?: string[] }).platforms || [] : [],
+        dataComponents: Array.isArray((analytic as { dataComponents?: string[] }).dataComponents) ? (analytic as { dataComponents?: string[] }).dataComponents || [] : [],
+      }))
+    );
+  }, [filteredCommunityStrategies]);
+
+  const exportPayload = useMemo(() => {
+    const generatedAt = new Date().toISOString();
+    return {
+      generatedAt,
+      product: {
+        productId: productKey,
+        vendor: product.vendor,
+        productName: product.productName,
+        platforms: allPlatforms,
+      },
+      filters: {
+        selectedTechniqueIds: Array.from(selectedTechniqueFilter),
+        selectedDataComponentIds: Array.from(selectedDataComponentFilter),
+        selectedCommunitySources: Array.from(sourceFilters),
+        hasTechniqueFilter,
+        hasDataComponentFilter,
+        scenario: {
+          enabled: scenarioFilterEnabled,
+          maxTechniques: scenarioMaxTechniques,
+          showAllRanked: scenarioShowAll,
+          answers: scenarioAnswers,
+          manualOverrides: Array.from(scenarioOverrideTechniqueIds),
+          excludedCounts: scenarioExcludedCounts,
+          totalExcluded: totalScenarioExcluded,
+        },
+      },
+      overview: {
+        stixStrategies: filteredStrategies.length,
+        stixAnalytics: totalAnalytics,
+        communityStrategies: communityStrategiesCount,
+        communityAnalytics: communityAnalyticsCount,
+        mappedTechniquesVisible: visibleTechniqueChips.length,
+        mappedDataComponentsVisible: visibleMappedDataComponents.length,
+      },
+      mappedTechniques: visibleTechniqueChips.map((tech) => ({
+        id: tech.id,
+        name: tech.name,
+        tactic: tech.tactic || null,
+      })),
+      mappedDataComponents: visibleMappedDataComponents.map((dc) => ({
+        id: dc.id,
+        name: dc.name,
+        dataSource: dc.dataSource || null,
+      })),
+      vendorEvidence: filteredVerifiedEvidence.map((entry) => ({
+        dataComponentId: entry.dataComponentId,
+        dataComponentName: entry.dataComponentName,
+        logSources: entry.logSources,
+      })),
+      stixMappings: {
+        strategies: filteredStrategies.map((strategy) => ({
+          id: strategy.id,
+          name: strategy.name,
+          techniques: strategy.techniques || [],
+          analytics: strategy.analytics.map((analytic) => ({
+            id: analytic.id,
+            name: analytic.name,
+            platforms: (analytic as { platforms?: string[] }).platforms || [],
+            dataComponents: (analytic as { dataComponents?: string[] }).dataComponents || [],
+          })),
+        })),
+        analytics: stixAnalyticsForExport,
+      },
+      communityMappings: {
+        strategies: filteredCommunityStrategies.map((strategy) => ({
+          id: strategy.id,
+          name: strategy.name,
+          techniques: strategy.techniques || [],
+          analytics: strategy.analytics.map((analytic) => ({
+            id: analytic.id,
+            name: analytic.name,
+            platforms: (analytic as { platforms?: string[] }).platforms || [],
+            dataComponents: (analytic as { dataComponents?: string[] }).dataComponents || [],
+          })),
+        })),
+        analytics: communityAnalyticsForExport,
+      },
+      notes: exportNotes.trim() || null,
+    };
+  }, [
+    allPlatforms,
+    communityAnalyticsCount,
+    communityStrategiesCount,
+    exportNotes,
+    filteredCommunityStrategies,
+    filteredStrategies,
+    filteredVerifiedEvidence,
+    hasDataComponentFilter,
+    hasTechniqueFilter,
+    product.productName,
+    product.vendor,
+    productKey,
+    scenarioAnswers,
+    scenarioExcludedCounts,
+    scenarioFilterEnabled,
+    scenarioMaxTechniques,
+    scenarioOverrideTechniqueIds,
+    scenarioShowAll,
+    selectedDataComponentFilter,
+    selectedTechniqueFilter,
+    sourceFilters,
+    stixAnalyticsForExport,
+    totalAnalytics,
+    visibleMappedDataComponents,
+    visibleTechniqueChips,
+    communityAnalyticsForExport,
+  ]);
+
+  const exportMarkdown = useMemo(() => {
+    const lines: string[] = [];
+    const generatedAt = new Date().toISOString();
+    const selectedTechniques = Array.from(selectedTechniqueFilter);
+    const selectedDataComponents = Array.from(selectedDataComponentFilter);
+    const selectedSources = Array.from(sourceFilters).map((src) => RESOURCE_LABELS[src]?.label || src);
+
+    lines.push(`# ${productTitle} - Mapping Export`);
+    lines.push('');
+    lines.push(`Generated: ${generatedAt}`);
+    lines.push(`Product ID: ${productKey}`);
+    lines.push(`Platforms: ${allPlatforms.length > 0 ? allPlatforms.join(', ') : 'None'}`);
+    lines.push('');
+    lines.push('## Applied Filters');
+    lines.push('');
+    lines.push(`- Technique filter: ${selectedTechniques.length > 0 ? selectedTechniques.join(', ') : 'None'}`);
+    lines.push(`- Data Component filter: ${selectedDataComponents.length > 0 ? selectedDataComponents.join(', ') : 'None'}`);
+    lines.push(`- Community source filter: ${selectedSources.length > 0 ? selectedSources.join(', ') : 'None'}`);
+    lines.push(`- Scenario filter enabled: ${scenarioFilterEnabled ? 'Yes' : 'No'}`);
+    if (scenarioFilterEnabled) {
+      lines.push(`- Scenario max techniques: ${scenarioShowAll ? 'All ranked' : scenarioMaxTechniques}`);
+      lines.push(`- Scenario answers: ${Object.entries(scenarioAnswers).map(([key, value]) => `${SCENARIO_QUESTION_LABELS[key as ScenarioQuestionKey]}=${value ? 'Yes' : 'No'}`).join(', ')}`);
+      lines.push(`- Scenario manual overrides: ${scenarioOverrideTechniqueIds.size > 0 ? Array.from(scenarioOverrideTechniqueIds).join(', ') : 'None'}`);
+      lines.push(`- Scenario exclusions: ${totalScenarioExcluded} (Black Box ${scenarioExcludedCounts.blackBox}, Pass-Through ${scenarioExcludedCounts.passThrough}, Human Surface ${scenarioExcludedCounts.humanSurface})`);
+    }
+    lines.push('');
+    lines.push('## Overview');
+    lines.push('');
+    lines.push(`- STIX Strategies: ${filteredStrategies.length}`);
+    lines.push(`- STIX Analytics: ${totalAnalytics}`);
+    lines.push(`- Community Strategies: ${communityStrategiesCount}`);
+    lines.push(`- Community Analytics: ${communityAnalyticsCount}`);
+    lines.push(`- Visible Techniques: ${visibleTechniqueChips.length}`);
+    lines.push(`- Visible Data Components: ${visibleMappedDataComponents.length}`);
+    lines.push('');
+    lines.push('## Mapped Techniques (Visible)');
+    lines.push('');
+    if (visibleTechniqueChips.length > 0) {
+      lines.push(
+        toMarkdownTable(
+          ['Technique ID', 'Name', 'Tactic'],
+          visibleTechniqueChips.map((tech) => [tech.id, tech.name, tech.tactic || 'Unknown'])
+        )
+      );
+    } else {
+      lines.push('_No visible techniques._');
+    }
+    lines.push('');
+    lines.push('## Mapped Data Components (Visible)');
+    lines.push('');
+    if (visibleMappedDataComponents.length > 0) {
+      lines.push(
+        toMarkdownTable(
+          ['Data Component ID', 'Name'],
+          visibleMappedDataComponents.map((dc) => [dc.id, dc.name])
+        )
+      );
+    } else {
+      lines.push('_No visible data components._');
+    }
+    lines.push('');
+    lines.push('## STIX Analytics (Visible)');
+    lines.push('');
+    if (stixAnalyticsForExport.length > 0) {
+      lines.push(
+        toMarkdownTable(
+          ['Strategy', 'Analytic ID', 'Analytic Name', 'Platforms', 'Data Components'],
+          stixAnalyticsForExport.map((analytic) => [
+            analytic.strategyName,
+            analytic.analyticId,
+            analytic.analyticName,
+            analytic.platforms.join(', '),
+            analytic.dataComponents.join(', '),
+          ])
+        )
+      );
+    } else {
+      lines.push('_No STIX analytics visible._');
+    }
+    lines.push('');
+    lines.push('## Community Analytics (Visible)');
+    lines.push('');
+    if (communityAnalyticsForExport.length > 0) {
+      lines.push(
+        toMarkdownTable(
+          ['Strategy', 'Analytic ID', 'Analytic Name', 'Platforms', 'Data Components'],
+          communityAnalyticsForExport.map((analytic) => [
+            analytic.strategyName,
+            analytic.analyticId,
+            analytic.analyticName,
+            analytic.platforms.join(', '),
+            analytic.dataComponents.join(', '),
+          ])
+        )
+      );
+    } else {
+      lines.push('_No community analytics visible._');
+    }
+    lines.push('');
+    lines.push('## Notes');
+    lines.push('');
+    lines.push(exportNotes.trim().length > 0 ? exportNotes.trim() : '_No notes provided._');
+    lines.push('');
+
+    return lines.join('\n');
+  }, [
+    allPlatforms,
+    communityAnalyticsCount,
+    communityAnalyticsForExport,
+    communityStrategiesCount,
+    exportNotes,
+    filteredStrategies.length,
+    productKey,
+    productTitle,
+    scenarioAnswers,
+    scenarioExcludedCounts.blackBox,
+    scenarioExcludedCounts.humanSurface,
+    scenarioExcludedCounts.passThrough,
+    scenarioFilterEnabled,
+    scenarioMaxTechniques,
+    scenarioOverrideTechniqueIds,
+    scenarioShowAll,
+    selectedDataComponentFilter,
+    selectedTechniqueFilter,
+    sourceFilters,
+    stixAnalyticsForExport,
+    totalAnalytics,
+    totalScenarioExcluded,
+    visibleMappedDataComponents,
+    visibleTechniqueChips,
+  ]);
+
+  const handleExportPdf = () => {
+    const originalTitle = document.title;
+    const reportTitle = `${product.vendor} ${product.productName} - Mapping Report`;
+    document.title = reportTitle;
+    const restoreTitle = () => {
+      document.title = originalTitle;
+    };
+    window.addEventListener('afterprint', restoreTitle, { once: true });
+    window.print();
+    window.setTimeout(restoreTitle, 1200);
+    toast({
+      title: 'Print dialog opened',
+      description: 'Choose "Save as PDF" to export the current filtered UI view.',
+    });
+  };
+
   const tocItems = [
     { id: 'overview', label: 'Overview' },
     { id: 'coverage', label: 'Coverage Summary' },
     { id: 'verified-evidence', label: 'Vendor Log Sources' },
-    { id: 'detection-strategies', label: 'CTID Mappings' },
-    { id: 'community-coverage', label: 'Mappings based from Community Resources' },
+    { id: 'detection-strategies', label: hasWizardGuidedCoverage ? 'STIX Wizard Mappings' : 'STIX Detection Mappings' },
+    { id: 'community-coverage', label: 'Community Detection Mappings' },
+    { id: 'export', label: 'Export' },
   ];
 
   return (
@@ -2977,23 +4027,23 @@ export function ProductView({ product, onBack }: ProductViewProps) {
             
             <section className="mt-6" id="coverage">
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-                <div className="p-4 rounded-lg border border-border bg-muted/30">
+                <div className="p-4 rounded-lg bg-muted/30">
                   <div className="text-2xl font-semibold text-foreground">
                     {filteredStrategies.length + communityStrategiesCount}
                   </div>
                   <div className="text-sm text-muted-foreground">CTID + Community Mappings</div>
                 </div>
-                <div className="p-4 rounded-lg border border-border bg-muted/30">
+                <div className="p-4 rounded-lg bg-muted/30">
                   <div className="text-2xl font-semibold text-foreground">
                     {totalAnalytics + communityAnalyticsCount}
                   </div>
                   <div className="text-sm text-muted-foreground">Analytics</div>
                 </div>
-                <div className="p-4 rounded-lg border border-border bg-muted/30">
+                <div className="p-4 rounded-lg bg-muted/30">
                   <div className="text-2xl font-semibold text-foreground">{overviewTechniqueCount}</div>
                   <div className="text-sm text-muted-foreground">Techniques Covered</div>
                 </div>
-                <div className="p-4 rounded-lg border border-border bg-muted/30">
+                <div className="p-4 rounded-lg bg-muted/30">
                 <div className="text-xl font-semibold text-foreground">
                   {`${mappedTechniqueStats.withCommunity}/${mappedTechniqueStats.total} (${mappedTechniqueStats.total > 0 ? Math.round((mappedTechniqueStats.withCommunity / mappedTechniqueStats.total) * 100) : 0}%)`}
                 </div>
@@ -3002,23 +4052,273 @@ export function ProductView({ product, onBack }: ProductViewProps) {
               </div>
             </section>
 
+            <section className="mt-6">
+              <div className="p-4 rounded-lg bg-card border border-border/60">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                      <Filter className="w-4 h-4 text-primary" />
+                      Scenario Technique Filter (Asset DNA)
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <button
+                            type="button"
+                            className="inline-flex items-center justify-center rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted"
+                            aria-label="Scenario filter info"
+                            data-testid="button-scenario-filter-info"
+                          >
+                            <Info className="w-3.5 h-3.5" />
+                          </button>
+                        </PopoverTrigger>
+                        <PopoverContent align="start" className="w-[34rem] max-h-[32rem] overflow-auto">
+                          <div className="space-y-3">
+                            <div>
+                              <div className="text-sm font-semibold text-foreground">How The Boolean Filter Works</div>
+                              <p className="text-xs text-muted-foreground mt-1">
+                                Uses 6 yes/no questions to rank and optionally reduce mapped techniques. Hard drops remove inapplicable
+                                technique families, tactic boosts prioritize likely attack paths, then top-N or full ranked mode is applied.
+                              </p>
+                            </div>
+
+                            <div>
+                              <div className="text-xs font-semibold text-foreground mb-1">References Used</div>
+                              <ul className="space-y-1">
+                                {SCENARIO_REFERENCE_LINKS.map((reference) => (
+                                  <li key={reference.url} className="text-xs">
+                                    <a
+                                      href={reference.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="inline-flex items-center gap-1 text-primary hover:underline"
+                                    >
+                                      <span>{reference.label}</span>
+                                      <ExternalLink className="w-3 h-3" />
+                                    </a>
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        </PopoverContent>
+                      </Popover>
+                    </h3>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      Prioritize mapped techniques using 6 product traits. This filters STIX and community techniques together.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Enable</span>
+                    <Switch
+                      checked={scenarioFilterEnabled}
+                      onCheckedChange={(value) => setScenarioFilterEnabled(Boolean(value))}
+                      data-testid="switch-scenario-filter"
+                    />
+                  </div>
+                </div>
+
+                <div className={cn("mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3", !scenarioFilterEnabled && "opacity-60")}>
+                  {(Object.keys(SCENARIO_QUESTION_LABELS) as ScenarioQuestionKey[]).map((key) => (
+                    <div key={key} className="rounded-md border border-border/60 p-3 bg-muted/20">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-medium text-foreground">{SCENARIO_QUESTION_LABELS[key]}</div>
+                        <Switch
+                          checked={scenarioAnswers[key]}
+                          disabled={!scenarioFilterEnabled}
+                          onCheckedChange={(value) => updateScenarioAnswer(key, Boolean(value))}
+                          data-testid={`switch-scenario-${key}`}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-2">{SCENARIO_QUESTION_HELP[key]}</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Why it matters: {SCENARIO_QUESTION_WHY[key]}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <label className="text-xs text-muted-foreground" htmlFor="scenario-max-techniques">
+                    Max techniques shown
+                  </label>
+                  <Input
+                    id="scenario-max-techniques"
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={scenarioMaxTechniques}
+                    disabled={!scenarioFilterEnabled || scenarioShowAll}
+                    onChange={(event) => {
+                      const parsed = parseInt(event.target.value, 10);
+                      if (Number.isNaN(parsed)) return;
+                      setScenarioMaxTechniques(Math.min(200, Math.max(1, parsed)));
+                    }}
+                    className="h-8 w-24 text-xs"
+                    data-testid="input-scenario-max-techniques"
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={!scenarioFilterEnabled}
+                    onClick={() => setScenarioShowAll((prev) => !prev)}
+                  >
+                    {scenarioShowAll ? 'Limit to Top N' : 'Show All Ranked'}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setScenarioAnswers(inferScenarioAnswers(productTitle, allPlatforms))}
+                  >
+                    Reset Suggested Answers
+                  </Button>
+                </div>
+
+                {scenarioFilterEnabled && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Badge variant="secondary" className="text-xs">
+                      Showing {scenarioTechniqueInsights.allowedSet.size}/{scenarioTechniqueInsights.totalCandidates} techniques
+                    </Badge>
+                    <Badge variant="outline" className="text-xs">
+                      Ranked {scenarioShowAll ? 'all' : `top ${scenarioMaxTechniques}`}
+                    </Badge>
+                    {totalScenarioExcluded > 0 && (
+                      <Badge variant="outline" className="text-xs">
+                        Excluded {totalScenarioExcluded} (Black Box {scenarioExcludedCounts.blackBox}, Pass-Through {scenarioExcludedCounts.passThrough}, Human Surface {scenarioExcludedCounts.humanSurface})
+                      </Badge>
+                    )}
+                  </div>
+                )}
+
+                {scenarioFilterEnabled && !scenarioAnswers.humanSurface && (
+                  <div className="mt-4 rounded-md border border-border/60 bg-background/60 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-medium text-foreground">
+                        Excluded by Human Surface = No ({humanSurfaceExcludedTechniques.length})
+                      </div>
+                      {scenarioOverrideTechniqueIds.size > 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={clearScenarioOverrides}
+                          className="h-7 text-xs"
+                        >
+                          Clear Overrides
+                        </Button>
+                      )}
+                    </div>
+
+                    {humanSurfaceExcludedTechniques.length > 0 ? (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {humanSurfaceExcludedTechniques.map((techId) => {
+                          const isOverridden = scenarioOverrideTechniqueIds.has(normalizeTechniqueId(techId));
+                          return (
+                            <button
+                              key={`override-${techId}`}
+                              type="button"
+                              onClick={() => toggleScenarioOverrideTechnique(techId)}
+                              className={cn(
+                                "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
+                                isOverridden
+                                  ? "border-primary/60 bg-primary/10 text-foreground"
+                                  : "border-border bg-muted/30 text-muted-foreground hover:text-foreground hover:border-primary/40"
+                              )}
+                              data-testid={`button-scenario-override-${techId}`}
+                            >
+                              <code className="font-mono text-[10px] text-red-600">{techId}</code>
+                              <span>{getTechniqueName(techId)}</span>
+                              <span className="text-[10px]">
+                                {isOverridden ? 'Remove Override' : 'Add Back'}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        No techniques currently excluded by the human-surface denylist.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {scenarioFilterEnabled && (
+                  <details className="mt-4 rounded-md border border-border/60 bg-background/60 p-3">
+                    <summary className="cursor-pointer text-xs font-medium text-foreground select-none">
+                      Score breakdown (top 15)
+                    </summary>
+                    <div className="mt-3 rounded-md overflow-hidden border border-border/60 keep-border">
+                      <table className="w-full text-xs">
+                        <thead className="bg-muted/40">
+                          <tr>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Technique</th>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Tactic</th>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Base</th>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Boost</th>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Final</th>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border">
+                          {scenarioTechniqueInsights.scoredEntries.slice(0, 15).map((entry) => (
+                            <tr key={`scenario-score-${entry.techniqueId}`}>
+                              <td className="px-2 py-2">
+                                <code className="font-mono text-red-600">{entry.techniqueId}</code>
+                              </td>
+                              <td className="px-2 py-2 text-foreground">{entry.tactic || 'Unknown'}</td>
+                              <td className="px-2 py-2 text-foreground">{entry.baseScore.toFixed(3)}</td>
+                              <td className="px-2 py-2 text-foreground">x{entry.boostMultiplier.toFixed(2)}</td>
+                              <td className="px-2 py-2 text-foreground">{entry.finalScore.toFixed(3)}</td>
+                              <td className="px-2 py-2 text-muted-foreground">
+                                {entry.dropped ? `Dropped (${entry.dropped})` : 'Included'}
+                              </td>
+                            </tr>
+                          ))}
+                          {scenarioTechniqueInsights.scoredEntries.length === 0 && (
+                            <tr>
+                              <td colSpan={6} className="px-2 py-3 text-center text-muted-foreground">
+                                No technique scoring data available.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+              </div>
+            </section>
+
             <div className="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <div className="p-4 rounded-lg border border-border bg-card">
+              <div className="p-4 rounded-lg bg-card">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
                     <Shield className="w-4 h-4 text-primary" />
                     Mapped Techniques
                   </h3>
-                  {visibilityTechniques.length > 20 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setShowAllTechniques(!showAllTechniques)}
-                      className="text-xs h-7 text-muted-foreground hover:text-foreground"
-                    >
-                      {showAllTechniques ? 'Show Less' : `Show All (${visibilityTechniques.length})`}
-                    </Button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {selectedTechniqueIds.size > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={clearTechniqueFilters}
+                        className="text-xs h-7 text-muted-foreground hover:text-foreground"
+                      >
+                        Clear Filter
+                      </Button>
+                    )}
+                    {visibleTechniqueChips.length > 20 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowAllTechniques(!showAllTechniques)}
+                        className="text-xs h-7 text-muted-foreground hover:text-foreground"
+                      >
+                        {showAllTechniques ? 'Show Less' : `Show All (${visibleTechniqueChips.length})`}
+                      </Button>
+                    )}
+                  </div>
                 </div>
                 <p className="text-sm text-muted-foreground mb-3">
                   Techniques mapped to this product (Detection + Visibility):
@@ -3027,21 +4327,21 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                   <div className="flex flex-wrap gap-2">
                     {(() => {
                       const detectionSet = new Set(detectionTechniques.map(t => t.id));
-                      return visibilityTechniques.map(tech => {
+                      return visibleTechniqueChips.map(tech => {
                         const hasDetection = detectionSet.has(tech.id);
+                        const normalizedId = normalizeTechniqueId(tech.id);
+                        const isSelected = selectedTechniqueFilter.has(normalizedId);
                         return (
                           <button
                             key={tech.id}
-                            onClick={() => {
-                              const tactic = tech.tactic.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-                              const element = document.getElementById(`ctid-tactic-${tactic}`);
-                              if (element) {
-                                element.scrollIntoView({ behavior: 'smooth' });
-                                setExpandedTactics(prev => new Set(prev).add(`ctid-tactic-${tactic}`));
-                                setExpandedTechniques(prev => new Set(prev).add(`ctid-tech-${tech.id}`));
-                              }
-                            }}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-muted/50 hover:bg-muted hover:border-primary/30 transition-colors text-sm"
+                            onClick={() => toggleTechniqueFilter(tech.id)}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border transition-colors text-sm",
+                              isSelected
+                                ? "border-primary/60 bg-primary/10 text-foreground"
+                                : "border-border bg-muted/50 hover:bg-muted hover:border-primary/30"
+                            )}
+                            aria-pressed={isSelected}
                             data-testid={`button-tech-chip-${tech.id}`}
                           >
                             <code className={cn(
@@ -3051,57 +4351,114 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                               {tech.id}
                             </code>
                             <span className="text-foreground">{tech.name}</span>
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                focusTechnique(tech.id, getPrimaryTactic(tech));
+                              }}
+                              className="ml-1 text-muted-foreground hover:text-foreground"
+                              title="Jump to tactic"
+                            >
+                              <ExternalLink className="w-3 h-3" />
+                            </button>
                           </button>
                         );
                       });
                     })()}
-                    {visibilityTechniques.length === 0 && (
-                      <div className="text-sm text-muted-foreground italic">No techniques mapped yet.</div>
+                    {visibleTechniqueChips.length === 0 && (
+                      <div className="text-sm text-muted-foreground italic">
+                        {hasTechniqueFilter
+                          ? 'No mapped techniques match the selected filter.'
+                          : scenarioFilterEnabled
+                            ? 'No mapped techniques match the current scenario settings.'
+                            : 'No techniques mapped yet.'}
+                      </div>
                     )}
                   </div>
                 </div>
               </div>
 
-              <div className="p-4 rounded-lg border border-border bg-card">
+              <div className="p-4 rounded-lg bg-card">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
                     <Database className="w-4 h-4 text-primary" />
                     Mapped Data Components
                   </h3>
-                  {mappedDataComponents.length > 20 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setShowAllDataComponents(!showAllDataComponents)}
-                      className="text-xs h-7 text-muted-foreground hover:text-foreground"
-                    >
-                      {showAllDataComponents ? 'Show Less' : `Show All (${mappedDataComponents.length})`}
-                    </Button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {selectedDataComponentIds.size > 0 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={clearDataComponentFilters}
+                        className="text-xs h-7 text-muted-foreground hover:text-foreground"
+                      >
+                        Clear Filter
+                      </Button>
+                    )}
+                    {visibleMappedDataComponents.length > 20 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowAllDataComponents(!showAllDataComponents)}
+                        className="text-xs h-7 text-muted-foreground hover:text-foreground"
+                      >
+                        {showAllDataComponents ? 'Show Less' : `Show All (${visibleMappedDataComponents.length})`}
+                      </Button>
+                    )}
+                  </div>
                 </div>
                 <p className="text-sm text-muted-foreground mb-3">
                   This asset provides the following telemetry sources:
                 </p>
                 <div className={cn("pr-4 overflow-y-auto", !showAllDataComponents && "max-h-48")}>
                   <div className="flex flex-wrap gap-2">
-                    {mappedDataComponents.map(dc => (
+                    {visibleMappedDataComponents.map(dc => {
+                      const normalizedId = normalizeDataComponentId(dc.id);
+                      const isSelected = selectedDataComponentFilter.has(normalizedId);
+                      return (
                         <button
                           key={dc.id}
-                          onClick={() => setSelectedDataComponent(dc)}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-muted/50 hover:bg-muted hover:border-primary/30 transition-colors text-sm"
+                          onClick={() => toggleDataComponentFilter(dc.id)}
+                          className={cn(
+                            "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border transition-colors text-sm",
+                            isSelected
+                              ? "border-primary/60 bg-primary/10 text-foreground"
+                              : "border-border bg-muted/50 hover:bg-muted hover:border-primary/30"
+                          )}
+                          aria-pressed={isSelected}
                           data-testid={`button-dc-chip-${dc.id}`}
                         >
-                          <code className="text-xs text-primary font-mono">{dc.id}</code>
+                          <Badge variant="secondary" className="text-[10px] font-mono">
+                            {dc.id}
+                          </Badge>
                           <span className="text-foreground">{dc.name}</span>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setSelectedDataComponent(dc);
+                            }}
+                            className="ml-1 text-muted-foreground hover:text-foreground"
+                            title="View details"
+                          >
+                            <Info className="w-3 h-3" />
+                          </button>
                         </button>
-                      ))}
+                      );
+                    })}
+                    {visibleMappedDataComponents.length === 0 && (
+                      <div className="text-sm text-muted-foreground italic">
+                        {hasDataComponentFilter ? 'No mapped data components match the selected filter.' : 'No data components mapped yet.'}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
             </div>
 
             <section className="mt-6" id="verified-evidence">
-              <div className="p-4 rounded-lg border border-border bg-card">
+              <div className="p-4 rounded-lg bg-card">
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
                     <Shield className="w-4 h-4 text-primary" />
@@ -3111,17 +4468,17 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                 <p className="text-sm text-muted-foreground mb-3">
                   Product-specific log sources captured from research or manual mapping.
                 </p>
-                {verifiedEvidence.length > 0 ? (
+                {filteredVerifiedEvidence.length > 0 ? (
                   <div className="space-y-4">
-                    {verifiedEvidence.map((entry) => {
+                    {filteredVerifiedEvidence.map((entry) => {
                       return (
-                        <div key={entry.dataComponentId} className="rounded-lg border border-border/60 bg-background/50 p-3 space-y-3">
+                        <div key={entry.dataComponentId} className="rounded-lg bg-background/50 p-3 space-y-3">
                           <div className="flex items-center justify-between">
                             <div className="text-sm font-semibold text-foreground">
                               {entry.dataComponentId} - {entry.dataComponentName}
                             </div>
                           </div>
-                          <div className="border border-border rounded-md overflow-hidden">
+                          <div className="rounded-md overflow-hidden border border-border keep-border">
                             <table className="w-full text-xs">
                               <thead className="bg-muted/50">
                                 <tr>
@@ -3163,8 +4520,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                     })}
                   </div>
                 ) : (
-                  <div className="text-sm text-muted-foreground border border-dashed border-border rounded-lg p-4 text-center">
-                    No vendor log sources saved yet.
+                  <div className="text-sm text-muted-foreground rounded-lg p-4 text-center">
+                    {hasDataComponentFilter
+                      ? 'No vendor log sources for the selected data components.'
+                      : 'No vendor log sources saved yet.'}
                   </div>
                 )}
               </div>
@@ -3175,27 +4534,27 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           <section id="detection-strategies">
             <h2 className="text-xl font-semibold text-foreground mb-4 flex items-center gap-2">
               <Shield className="w-5 h-5 text-primary" />
-              CTID Mappings
+              {hasWizardGuidedCoverage ? 'Mappings using STIX Data (Wizard)' : 'Mappings using STIX Data'}
             </h2>
             <p className="text-muted-foreground mb-6">
-              CTID mappings for {product.productName} on {platform}, organized by tactic, technique, and analytic for easier traversal.
+              MITRE STIX-based mappings for {product.productName}, organized by tactic, technique, strategy, and analytic for easier traversal.
             </p>
 
             {ctidAttackTree.length > 0 ? (
               renderAttackTree(ctidAttackTree, 'ctid', renderStrategyList)
             ) : (
-              <div className="py-12 text-center text-muted-foreground border border-dashed border-border rounded-lg">
-                No CTID mappings found for {product.productName} on {platform}.
+              <div className="py-12 text-center text-muted-foreground rounded-lg">
+                No STIX mappings found for {product.productName}.
               </div>
             )}
           </section>
 
-          {/* Mappings based from Community Resources */}
+          {/* Community Detection Mappings */}
           <section id="community-coverage" className="mt-10">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-semibold text-foreground flex items-center gap-2">
                 <Zap className="w-5 h-5 text-primary" />
-                Mappings based from Community Resources
+                Community Detection Mappings
                 {availableSources.length > 0 && (
                   <Badge variant="secondary" className="ml-2 text-xs">
                     {communityStrategiesCount} Strategies / {communityAnalyticsCount} Analytics
@@ -3256,7 +4615,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
             </p>
 
             {autoMapping.isLoading && (
-              <div className="py-8 text-center border border-dashed border-border rounded-lg">
+              <div className="py-8 text-center rounded-lg">
                 <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-primary" />
                 <p className="text-muted-foreground">Querying community resources...</p>
               </div>
@@ -3269,13 +4628,13 @@ export function ProductView({ product, onBack }: ProductViewProps) {
             )}
 
             {autoMapping.data?.status === 'matched' && !autoMapping.isLoading && autoMapping.enrichedMapping && filteredCommunityStrategies.length === 0 && autoMapping.enrichedMapping.techniqueIds.length === 0 && (
-              <div className="py-8 text-center border border-dashed border-border rounded-lg">
+              <div className="py-8 text-center rounded-lg">
                 <p className="text-muted-foreground">Found community references, but no MITRE ATT&CK technique IDs could be extracted from the detection rules.</p>
               </div>
             )}
 
             {autoMapping.data?.status === 'matched' && !autoMapping.isLoading && autoMapping.enrichedMapping && filteredCommunityStrategies.length === 0 && autoMapping.enrichedMapping.techniqueIds.length > 0 && (
-              <div className="p-4 rounded-lg border border-border bg-card">
+              <div className="p-4 rounded-lg bg-card">
                 <div className="flex items-start gap-3">
                   <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
                   <div>
@@ -3307,7 +4666,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
             )}
 
             {autoMapping.data?.status === 'ai_pending' && (
-              <div className="py-8 text-center border border-dashed border-amber-500/50 rounded-lg bg-amber-500/5">
+              <div className="py-8 text-center rounded-lg bg-amber-500/5">
                 <AlertCircle className="w-6 h-6 mx-auto mb-2 text-amber-500" />
                 <p className="text-amber-600 font-medium">No Automated Mappings Found</p>
                 <p className="text-sm text-muted-foreground mt-1">
@@ -3317,21 +4676,54 @@ export function ProductView({ product, onBack }: ProductViewProps) {
             )}
 
             {autoMapping.data?.status === 'not_found' && (
-              <div className="py-8 text-center border border-dashed border-border rounded-lg">
+              <div className="py-8 text-center rounded-lg">
                 <p className="text-muted-foreground">No references to this product found in community detection rule repositories (Sigma, Elastic, Splunk, Azure).</p>
               </div>
             )}
 
             {!autoMapping.data && !autoMapping.isLoading && (
-              <div className="py-8 text-center border border-dashed border-border rounded-lg">
+              <div className="py-8 text-center rounded-lg">
                 <p className="text-muted-foreground">Community coverage will load automatically.</p>
               </div>
             )}
           </section>
+
+          <section id="export" className="mt-10">
+            <h2 className="text-xl font-semibold text-foreground mb-4 flex items-center gap-2">
+              <FileText className="w-5 h-5 text-primary" />
+              Export Snapshot
+            </h2>
+            <p className="text-muted-foreground mb-4">
+              Export this page with current filters and scenario view applied. Add notes below to include them at the bottom of the export.
+            </p>
+            <div className="p-4 rounded-lg bg-card space-y-4">
+              <div>
+                <label className="text-sm font-medium text-foreground mb-2 block">Notes</label>
+                <Textarea
+                  value={exportNotes}
+                  onChange={(event) => setExportNotes(event.target.value)}
+                  placeholder="Add scenario context, assumptions, coverage caveats, and implementation notes..."
+                  className="min-h-[120px]"
+                  data-testid="textarea-export-notes"
+                />
+              </div>
+              <div className="no-print flex flex-wrap gap-2">
+                <Button type="button" size="sm" variant="outline" onClick={handleExportPdf}>
+                  <FileDown className="w-4 h-4 mr-2" />
+                  Export PDF
+                </Button>
+                <StixExportControls
+                  baseName={`${product.vendor}-${product.productName}-mapping-view`}
+                  jsonPayload={exportPayload}
+                  markdownContent={exportMarkdown}
+                />
+              </div>
+            </div>
+          </section>
         </div>
       </div>
 
-      <aside className="w-40 flex-shrink-0 border-l border-border p-6 sticky top-0 h-screen overflow-auto hidden xl:block">
+      <aside className="no-print w-40 flex-shrink-0 border-l border-border p-6 sticky top-0 h-screen overflow-auto hidden xl:block">
         <h3 className="text-sm font-medium text-foreground mb-3">On this page</h3>
         <nav className="space-y-1">
           {tocItems.map(item => (

@@ -126,7 +126,7 @@ export default function Threats() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto rounded-lg border border-border keep-border">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="border-b border-border">

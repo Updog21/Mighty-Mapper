@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -8,11 +8,12 @@ import { Label } from '@/components/ui/label';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
 import { CheckCircle2, ChevronRight, Loader2, Plus, Trash2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { AnalyticRequirementsPanel, InlineRequirementHint, type EnrichedEvidence } from '@/components/AnalyticRequirementsPanel';
-import { normalizePlatformList, platformMatchesAny } from '@shared/platforms';
+import { normalizePlatformList } from '@shared/platforms';
 
 interface AIMapperFlowProps {
   initialQuery?: string;
@@ -23,6 +24,7 @@ interface AIMapperFlowProps {
 }
 
 type Step = 'details' | 'platforms' | 'platform-review' | 'review' | 'auto-results' | 'streams' | 'analyzing' | 'evidence' | 'guided-summary' | 'guided-results' | 'complete';
+type AiProgressKey = 'platformCheck' | 'geminiSuggest' | 'research';
 
 interface MitrePlatformsResponse {
   platforms: string[];
@@ -41,13 +43,18 @@ interface MitreDataComponent {
   revoked?: boolean;
   deprecated?: boolean;
   relevanceScore?: number;
+  detectionStrategies?: Array<{
+    id: string;
+    name: string;
+    techniques?: Array<{ id: string; name: string }>;
+  }>;
 }
 
 interface MitreDataComponentsMeta {
   total: number;
   withPlatforms: number;
   matched: number;
-  fallbackReason?: 'none' | 'no_platform_metadata' | 'no_platform_matches' | 'graph_unavailable';
+  fallbackReason?: 'none' | 'no_platform_metadata' | 'no_platform_matches' | 'no_detection_content' | 'graph_unavailable';
   unscopedIncluded?: boolean;
 }
 
@@ -99,6 +106,7 @@ interface PlatformAlternativeResult {
 
 interface PlatformCheckResponse {
   model: string;
+  suggestedPlatforms?: string[];
   validation?: PlatformValidationResult[];
   alternativePlatformsFound?: PlatformAlternativeResult[];
   sources?: Array<{ title?: string; url: string }>;
@@ -118,6 +126,7 @@ interface GeminiMappingDecision {
   reason?: string;
   evidence?: string;
   sourceUrl?: string;
+  sourceUrlVerified?: boolean;
   confidence?: "high" | "medium" | "low";
   scope?: "exact" | "suite-explicit" | "platform-explicit";
 }
@@ -246,6 +255,50 @@ const PLATFORM_DESCRIPTIONS: Record<string, string> = {
   'Containers': 'Container runtime or Kubernetes.',
   'ESXi': 'VMware ESXi / vSphere environments.',
   'Network Devices': 'Network appliances, routers, switches, and sensors.',
+};
+
+const PLATFORM_EXAMPLES: Record<string, string> = {
+  'Windows': 'Event IDs 4624/4625, PowerShell logs, Sysmon process creation',
+  'Linux': 'auth.log, auditd process execution, sudo command history',
+  'macOS': 'Unified logs, EndpointSecurity process/file events',
+  'Android': 'Mobile device management audit events, app install telemetry',
+  'iOS': 'MDM compliance events, authentication/audit records',
+  'PRE': 'Recon scanning, target profiling, social engineering prep',
+  'IaaS': 'CloudTrail activity, Azure Activity Logs, GCP audit logs',
+  'SaaS': 'Admin audit logs, sign-in telemetry, API activity records',
+  'Office 365': 'Unified Audit Log, Exchange mailbox actions, Teams events',
+  'Office Suite': 'Productivity app access patterns, document activity logs',
+  'Identity Provider': 'Authentication events, token issuance, policy changes',
+  'Google Workspace': 'Admin console audit, Drive activity, login events',
+  'Azure AD': 'SignInLogs, AuditLogs, risky sign-in detections',
+  'AWS': 'CloudTrail API calls, GuardDuty findings, Config changes',
+  'Azure': 'Activity Logs, resource deployment changes, Sentinel telemetry',
+  'GCP': 'Cloud Audit Logs, IAM policy changes, workload events',
+  'Containers': 'Kubernetes audit logs, container runtime events',
+  'ESXi': 'vSphere task logs, VM lifecycle and host audit events',
+  'Network Devices': 'Firewall logs, router/switch config changes, NetFlow',
+};
+
+const PLATFORM_PRODUCT_EXAMPLES: Record<string, string> = {
+  'Windows': 'Microsoft Defender for Endpoint, CrowdStrike Falcon',
+  'Linux': 'GitLab Enterprise (self-managed), Wazuh, self-managed API gateways',
+  'macOS': 'Jamf Protect, Kandji, SentinelOne',
+  'Android': 'Intune MDM, Workspace ONE UEM',
+  'iOS': 'Intune MDM, Jamf Pro',
+  'PRE': 'Attack surface management, external recon platforms',
+  'IaaS': 'Wiz Security (CSPM/CNAPP), Prisma Cloud, Orca Security',
+  'SaaS': 'ServiceNow (SaaS), Datadog Cloud, Snowflake (SaaS)',
+  'Office 365': 'Microsoft Defender for Office 365, Purview audit',
+  'Office Suite': 'Microsoft 365 apps, Google Workspace apps',
+  'Identity Provider': 'Okta, Ping Identity, Auth0',
+  'Google Workspace': 'Google Workspace Admin, Chronicle integrations',
+  'Azure AD': 'Microsoft Entra ID, Defender for Identity signals',
+  'AWS': 'AWS Security Lake, GuardDuty, CloudTrail',
+  'Azure': 'Microsoft Sentinel, Defender for Cloud',
+  'GCP': 'Security Command Center, Cloud Audit Logs',
+  'Containers': 'Kubernetes audit, Falco, Aqua Security',
+  'ESXi': 'VMware vSphere/ESXi, vCenter audit',
+  'Network Devices': 'Palo Alto, Cisco ASA/FTD, Fortinet, F5',
 };
 
 function slugify(value: string) {
@@ -398,6 +451,7 @@ type EnrichmentLogSource = {
   evidence?: string;
   notes?: string;
   source_url?: string;
+  unverified_source_url?: string;
   verified_by_ai?: boolean;
 };
 
@@ -485,6 +539,9 @@ const normalizeEnrichmentResults = (raw: unknown): EnrichmentResult[] => {
             evidence: normalizeString(source?.evidence) || undefined,
             notes: normalizeString(source?.notes) || normalizeString(source?.note) || undefined,
             source_url: normalizeString(source?.source_url) || normalizeString(source?.sourceUrl) || undefined,
+            unverified_source_url: normalizeString(source?.unverified_source_url)
+              || normalizeString(source?.unverifiedSourceUrl)
+              || undefined,
             verified_by_ai: source?.verified_by_ai === true || source?.verifiedByAi === true
               ? true
               : source?.verified_by_ai === false || source?.verifiedByAi === false
@@ -514,19 +571,39 @@ const mergeEnrichmentResults = (
   const addLogSources = (target: EnrichmentResult, sources: EnrichmentLogSource[]) => {
     const byKey = new Map<string, EnrichmentLogSource>();
     target.log_sources.forEach((source) => {
-      const key = `${source.name.toLowerCase()}|${(source.source_url || '').toLowerCase()}`;
+      const key = `${source.name.toLowerCase()}|${(source.source_url || '').toLowerCase()}|${(source.unverified_source_url || '').toLowerCase()}`;
       byKey.set(key, source);
     });
     sources.forEach((source) => {
-      const key = `${source.name.toLowerCase()}|${(source.source_url || '').toLowerCase()}`;
+      const key = `${source.name.toLowerCase()}|${(source.source_url || '').toLowerCase()}|${(source.unverified_source_url || '').toLowerCase()}`;
       const existing = byKey.get(key);
       if (existing) {
         const existingChannels = existing.channel || [];
         const incomingChannels = source.channel || [];
         const mergedChannels = Array.from(new Set([...existingChannels, ...incomingChannels]));
         existing.channel = mergedChannels.length > 0 ? mergedChannels : existing.channel;
+        const existingRequired = existing.required_fields || [];
+        const incomingRequired = source.required_fields || [];
+        const mergedRequired = Array.from(new Set([...existingRequired, ...incomingRequired]));
+        existing.required_fields = mergedRequired.length > 0 ? mergedRequired : existing.required_fields;
+        const existingMissing = existing.missing_fields || [];
+        const incomingMissing = source.missing_fields || [];
+        const mergedMissing = Array.from(new Set([...existingMissing, ...incomingMissing]));
+        existing.missing_fields = mergedMissing.length > 0 ? mergedMissing : existing.missing_fields;
+        if (!existing.evidence && source.evidence) {
+          existing.evidence = source.evidence;
+        }
         if (!existing.notes && source.notes) {
           existing.notes = source.notes;
+        }
+        if (!existing.source_url && source.source_url) {
+          existing.source_url = source.source_url;
+        }
+        if (!existing.unverified_source_url && source.unverified_source_url) {
+          existing.unverified_source_url = source.unverified_source_url;
+        }
+        if (existing.verified_by_ai === undefined && source.verified_by_ai !== undefined) {
+          existing.verified_by_ai = source.verified_by_ai;
         }
         return;
       }
@@ -756,6 +833,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   const [createdProductId, setCreatedProductId] = useState<string | null>(null);
   const [progressMessage, setProgressMessage] = useState('Preparing mapping...');
   const [suggestionsApplied, setSuggestionsApplied] = useState(false);
+  const [suggestionsAppliedForInput, setSuggestionsAppliedForInput] = useState('');
   const [ssmCapabilities, setSsmCapabilities] = useState<SsmCapability[]>([]);
   const [techniqueRequirements, setTechniqueRequirements] = useState<Record<string, TechniqueRequirement[]>>({});
   const [evidenceEntries, setEvidenceEntries] = useState<Record<string, TechniqueEvidenceEntry[]>>({});
@@ -782,9 +860,22 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   const [platformCheckLoading, setPlatformCheckLoading] = useState(false);
   const [platformCheckResults, setPlatformCheckResults] = useState<PlatformCheckResponse | null>(null);
   const [platformCheckHasRun, setPlatformCheckHasRun] = useState(false);
-  const [platformCheckEnabled, setPlatformCheckEnabled] = useState(false);
+  const [platformCheckEnabled, setPlatformCheckEnabled] = useState(true);
   const [autoResultsNextStep, setAutoResultsNextStep] = useState<Step>('streams');
   const [includeUnscopedDataComponents, setIncludeUnscopedDataComponents] = useState(false);
+  const [aiProgress, setAiProgress] = useState<Record<AiProgressKey, number>>({
+    platformCheck: 0,
+    geminiSuggest: 0,
+    research: 0,
+  });
+  const aiProgressTimersRef = useRef<Record<AiProgressKey, {
+    intervalId: ReturnType<typeof setInterval> | null;
+    timeoutId: ReturnType<typeof setTimeout> | null;
+  }>>({
+    platformCheck: { intervalId: null, timeoutId: null },
+    geminiSuggest: { intervalId: null, timeoutId: null },
+    research: { intervalId: null, timeoutId: null },
+  });
 
   const { data: platformData, isLoading: platformsLoading } = useQuery({
     queryKey: ['mitre-platforms'],
@@ -811,6 +902,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   const dataComponentsMeta = dataComponentsData?.meta;
   const dataComponentsFallbackReason = dataComponentsMeta?.fallbackReason ?? 'none';
   const canShowUnscopedToggle = dataComponentsFallbackReason === 'no_platform_metadata'
+    || dataComponentsFallbackReason === 'no_detection_content'
     || dataComponentsFallbackReason === 'graph_unavailable';
 
   const suggestionInput = useMemo(
@@ -837,41 +929,12 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     if (!component) return id;
     return `${component.id} - ${component.name}`;
   };
-  const groupedDataComponents = useMemo(() => {
-    const groups = new Map<string, MitreDataComponent[]>();
-    const normalizedSelected = normalizePlatformList(selectedPlatformsList);
-
-    dataComponents.forEach(component => {
-      const componentPlatforms = (component.platforms || []).map((platform) => platform.trim()).filter(Boolean);
-      let groupName = normalizedSelected.find((platform) =>
-        platformMatchesAny(componentPlatforms, [platform])
-      );
-
-      if (!groupName) {
-        const resolvedComponent = normalizePlatformList(componentPlatforms);
-        groupName = resolvedComponent[0] || normalizedSelected[0] || 'Unspecified Platform';
-      }
-
-      const existing = groups.get(groupName) || [];
-      existing.push(component);
-      groups.set(groupName, existing);
-    });
-
-    const orderedGroups = [
-      ...normalizedSelected,
-      ...Array.from(groups.keys()).filter((key) => !normalizedSelected.includes(key)).sort(),
-    ];
-
-    return orderedGroups
-      .map((group) => ({
-        group,
-        components: (groups.get(group) || []).sort((a, b) => a.name.localeCompare(b.name)),
-      }))
-      .filter((group) => group.components.length > 0);
-  }, [dataComponents, selectedPlatformsList]);
+  const visibleDataComponents = useMemo(() => {
+    return [...dataComponents].sort((a, b) => a.name.localeCompare(b.name));
+  }, [dataComponents]);
   const wizardContextOptions = useMemo(
-    () => groupedDataComponents.map(group => group.group),
-    [groupedDataComponents]
+    () => (visibleDataComponents.length > 0 ? ['all'] : []),
+    [visibleDataComponents.length]
   );
 
   useEffect(() => {
@@ -898,10 +961,47 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     return Boolean(mappingSummary) && evidenceTechniqueCount < EVIDENCE_AUTO_THRESHOLD;
   }, [mappingSummary, evidenceTechniqueCount, EVIDENCE_AUTO_THRESHOLD]);
 
-  const baseStepItems = platformCheckEnabled
-    ? baseSteps
-    : baseSteps.filter((stepItem) => stepItem.id !== 'platform-review');
+  const baseStepItems = baseSteps;
   const stepItems = isEvidenceOnly ? evidenceSteps : baseStepItems;
+
+  const startAiProgress = (key: AiProgressKey) => {
+    const timerState = aiProgressTimersRef.current[key];
+    if (timerState.intervalId) clearInterval(timerState.intervalId);
+    if (timerState.timeoutId) clearTimeout(timerState.timeoutId);
+    setAiProgress((prev) => ({ ...prev, [key]: 0 }));
+    timerState.intervalId = setInterval(() => {
+      setAiProgress((prev) => {
+        const current = prev[key];
+        if (current >= 95) return prev;
+        const increment = Math.max(1, Math.round((100 - current) / 16));
+        return { ...prev, [key]: Math.min(95, current + increment) };
+      });
+    }, 220);
+  };
+
+  const completeAiProgress = (key: AiProgressKey) => {
+    const timerState = aiProgressTimersRef.current[key];
+    if (timerState.intervalId) {
+      clearInterval(timerState.intervalId);
+      timerState.intervalId = null;
+    }
+    setAiProgress((prev) => ({ ...prev, [key]: 100 }));
+    if (timerState.timeoutId) clearTimeout(timerState.timeoutId);
+    timerState.timeoutId = setTimeout(() => {
+      setAiProgress((prev) => ({ ...prev, [key]: 0 }));
+      timerState.timeoutId = null;
+    }, 1000);
+  };
+
+  useEffect(() => {
+    return () => {
+      (Object.keys(aiProgressTimersRef.current) as AiProgressKey[]).forEach((key) => {
+        const timerState = aiProgressTimersRef.current[key];
+        if (timerState.intervalId) clearInterval(timerState.intervalId);
+        if (timerState.timeoutId) clearTimeout(timerState.timeoutId);
+      });
+    };
+  }, []);
 
   useEffect(() => {
     setIncludeUnscopedDataComponents(false);
@@ -990,13 +1090,15 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     if (heuristicSuggestedPlatforms.length === 0) return;
     setSelectedPlatforms(new Set(heuristicSuggestedPlatforms));
     setSuggestionsApplied(true);
+    setSuggestionsAppliedForInput(suggestionInput);
   }, [step, heuristicSuggestedPlatforms, selectedPlatforms.size, suggestionsApplied]);
 
   useEffect(() => {
-    if (selectedPlatforms.size === 0) {
+    if (!suggestionsApplied) return;
+    if (suggestionInput !== suggestionsAppliedForInput) {
       setSuggestionsApplied(false);
     }
-  }, [suggestionInput, selectedPlatforms.size]);
+  }, [suggestionInput, suggestionsApplied, suggestionsAppliedForInput]);
 
   useEffect(() => {
     if (step !== 'evidence') return;
@@ -1010,9 +1112,9 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     if (step === 'analyzing') return false;
     if (step === 'complete') return target === 'complete';
     if (target === 'platforms') return (vendor || product) && description;
-    if (target === 'platform-review') return platformCheckEnabled && selectedPlatforms.size > 0;
+    if (target === 'platform-review') return true;
     if (target === 'auto-results') return Boolean(mappingSummary);
-    if (target === 'review') return selectedPlatforms.size > 0;
+    if (target === 'review') return true;
     if (target === 'streams') return createdProductId !== null;
     if (target === 'guided-summary') {
       if (!hasConfiguredStreams) return false;
@@ -1024,21 +1126,31 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     return true;
   };
 
+  const renderFixedFooter = (content: ReactNode) => (
+    <div className="fixed inset-x-0 bottom-0 z-40 border-t border-border bg-background/95 backdrop-blur">
+      <div className="mx-auto w-full max-w-[1400px] px-4 py-3 sm:px-6">
+        {content}
+      </div>
+    </div>
+  );
+
+  const renderFooterSpacer = () => <div className="h-24" aria-hidden />;
+
   const renderStepper = () => (
-    <div className="w-full mb-8">
-      <div className="flex items-center gap-6">
+    <div className="w-full mb-4 overflow-x-auto pb-1">
+      <div className="flex min-w-max items-center gap-2 pr-2">
         {stepItems.map((item, index) => {
           const isActive = item.id === step;
           const stepIndex = stepItems.findIndex(s => s.id === step);
           const isComplete = stepIndex > index;
           return (
-            <div key={item.id} className="flex items-center gap-3">
+            <div key={item.id} className="flex items-center gap-2">
               <div className="relative group">
                 <Button
                   variant="ghost"
-                  size="lg"
+                  size="sm"
                   className={cn(
-                    'flex items-center gap-4 px-4 py-3 text-lg',
+                    'flex items-center gap-2 whitespace-nowrap px-2 py-1.5 text-sm',
                     isActive && 'text-primary',
                     !canNavigateTo(item.id) && 'opacity-50 cursor-not-allowed'
                   )}
@@ -1049,7 +1161,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 >
                   <span
                     className={cn(
-                      'w-12 h-12 rounded-full border text-lg flex items-center justify-center',
+                      'h-8 w-8 rounded-full border text-sm flex items-center justify-center',
                       isActive && 'border-primary text-primary',
                       isComplete && 'bg-primary text-primary-foreground border-primary',
                       !isActive && !isComplete && 'border-border text-muted-foreground'
@@ -1057,14 +1169,14 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                   >
                     {index + 1}
                   </span>
-                  <span className="text-lg font-semibold">{item.label}</span>
+                  <span className="text-sm font-medium">{item.label}</span>
                 </Button>
-                <div className="pointer-events-none absolute left-1/2 top-full z-10 w-60 -translate-x-1/2 translate-y-2 rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground opacity-0 shadow-sm transition group-hover:opacity-100">
+                <div className="pointer-events-none absolute left-1/2 top-full z-10 w-48 -translate-x-1/2 translate-y-2 rounded-md border border-border bg-background px-3 py-2 text-xs text-muted-foreground opacity-0 shadow-sm transition group-hover:opacity-100">
                   {STEP_DESCRIPTIONS[item.id]}
                 </div>
               </div>
               {index < stepItems.length - 1 && (
-                <div className={cn('h-px w-12', isComplete ? 'bg-primary' : 'bg-border')} />
+                <div className={cn('h-px w-6', isComplete ? 'bg-primary' : 'bg-border')} />
               )}
             </div>
           );
@@ -1211,12 +1323,18 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             evidence: typeof source?.evidence === 'string' ? source.evidence : undefined,
             sourceUrl: typeof source?.sourceUrl === 'string'
               ? source.sourceUrl
-              : typeof source?.source_url === 'string' ? source.source_url : undefined,
+              : typeof source?.source_url === 'string'
+                ? source.source_url
+                : typeof source?.unverified_source_url === 'string'
+                  ? source.unverified_source_url
+                  : undefined,
             notes: normalizeString(source?.notes) || undefined,
             verifiedByAi: source?.verifiedByAi === true || source?.verified_by_ai === true
               ? true
               : source?.verifiedByAi === false || source?.verified_by_ai === false
                 ? false
+                : typeof source?.unverified_source_url === 'string' && source.unverified_source_url.trim().length > 0
+                  ? false
                 : undefined,
           };
         }).filter((source: { name: string }) => source.name.trim().length > 0)
@@ -1245,7 +1363,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     return normalizePlatformList(normalizedPlatforms);
   }, [researchResults]);
 
-  const platformCheckValidation = useMemo(() => {
+  const platformCheckValidation = useMemo((): PlatformValidationResult[] => {
     const validationRaw = platformCheckResults?.validation
       ?? (platformCheckResults as { validation?: unknown } | null)?.validation
       ?? [];
@@ -1277,10 +1395,10 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           ? entry.sourceUrl
           : typeof entry?.source_url === 'string' ? entry.source_url : undefined,
       };
-    }).filter((entry: PlatformValidationResult | null): entry is PlatformValidationResult => Boolean(entry));
+    }).filter(Boolean) as PlatformValidationResult[];
   }, [platformCheckResults]);
 
-  const platformCheckAlternatives = useMemo(() => {
+  const platformCheckAlternatives = useMemo((): PlatformAlternativeResult[] => {
     const alternativesRaw = platformCheckResults?.alternativePlatformsFound
       ?? (platformCheckResults as { alternative_platforms_found?: unknown } | null)?.alternative_platforms_found
       ?? [];
@@ -1300,7 +1418,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           ? entry.sourceUrl
           : typeof entry?.source_url === 'string' ? entry.source_url : undefined,
       };
-    }).filter((entry: PlatformAlternativeResult | null): entry is PlatformAlternativeResult => Boolean(entry));
+    }).filter(Boolean) as PlatformAlternativeResult[];
   }, [platformCheckResults]);
 
   const platformCheckSummary = useMemo(() => {
@@ -1312,14 +1430,13 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
         noEvidence: [...selectedPlatformsList],
       };
     }
-    const validationMap = new Map(
-      platformCheckValidation.map((entry) => [entry.platform.toLowerCase(), entry])
-    );
     const supported: string[] = [];
     const unsupported: string[] = [];
     const noEvidence: string[] = [];
     selectedPlatformsList.forEach((platform) => {
-      const match = validationMap.get(platform.toLowerCase());
+      const match = platformCheckValidation.find(
+        (entry) => entry.platform.toLowerCase() === platform.toLowerCase()
+      );
       if (!match) {
         noEvidence.push(platform);
         return;
@@ -1388,15 +1505,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   };
 
   const handleNextPlatforms = () => {
-    if (selectedPlatforms.size === 0) {
-      toast({
-        title: 'Select platforms',
-        description: 'Choose at least one MITRE platform to continue.',
-        variant: 'destructive',
-      });
-      return;
-    }
-    setStep(platformCheckEnabled ? 'platform-review' : 'review');
+    setStep('platform-review');
   };
 
   const handleBackStreams = () => {
@@ -1408,12 +1517,12 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   };
 
   const runPlatformCheck = async () => {
-    if (platformCheckLoading || platformCheckHasRun) return;
+    if (platformCheckLoading) return;
     if (!platformCheckEnabled) return;
-    if (!vendor.trim() && !product.trim()) {
+    if (!vendor.trim() && !product.trim() && aliases.length === 0) {
       toast({
         title: 'Missing product info',
-        description: 'Add a vendor or product name before running the platform check.',
+        description: 'Add a vendor, product, or alias before running the platform check.',
         variant: 'destructive',
       });
       return;
@@ -1423,6 +1532,8 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     try {
       setPlatformCheckLoading(true);
       didAttempt = true;
+      setPlatformCheckResults(null);
+      startAiProgress('platformCheck');
       const response = await fetch('/api/ai/research/platforms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1430,27 +1541,55 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           vendor,
           product,
           description,
+          aliases,
           platforms: selectedPlatformsList,
         }),
       });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error || 'Failed to run platform check');
+      let payload: any = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
       }
-      setPlatformCheckResults(payload);
+      if (!response.ok) {
+        throw new Error(payload?.error || `Failed to run platform check (${response.status})`);
+      }
+      const rawSuggestedPlatforms = Array.isArray((payload as { suggestedPlatforms?: unknown }).suggestedPlatforms)
+        ? (payload as { suggestedPlatforms?: string[] }).suggestedPlatforms || []
+        : Array.isArray((payload as { suggested_platforms?: unknown }).suggested_platforms)
+          ? (payload as { suggested_platforms?: string[] }).suggested_platforms || []
+          : [];
+      const suggestedPlatforms = normalizePlatformList(
+        rawSuggestedPlatforms.filter((platform): platform is string => typeof platform === 'string' && platform.trim().length > 0)
+      );
+      setPlatformCheckResults({
+        ...payload,
+        suggestedPlatforms,
+      });
+      
+      // Auto-select suggested platforms
+      if (suggestedPlatforms.length > 0) {
+        const newSelection = new Set(selectedPlatforms);
+        suggestedPlatforms.forEach((platform: string) => newSelection.add(platform));
+        setSelectedPlatforms(newSelection);
+      }
+      
       const validationCount = Array.isArray(payload.validation)
         ? payload.validation.length
         : 0;
       const alternativeCount = Array.isArray(payload.alternativePlatformsFound)
         ? payload.alternativePlatformsFound.length
         : 0;
+      
       toast({
         title: 'Platform check complete',
-        description: validationCount > 0
-          ? `Validated ${validationCount} platform${validationCount === 1 ? '' : 's'} with evidence.`
-          : alternativeCount > 0
-            ? `Found ${alternativeCount} alternative platform${alternativeCount === 1 ? '' : 's'} outside the selected focus.`
-            : 'No platform evidence was returned.',
+        description: suggestedPlatforms.length > 0
+          ? `Suggested and selected ${suggestedPlatforms.length} platform${suggestedPlatforms.length === 1 ? '' : 's'} based on product documentation.`
+          : validationCount > 0
+            ? `Validated ${validationCount} platform${validationCount === 1 ? '' : 's'} with evidence.`
+            : alternativeCount > 0
+              ? `Found ${alternativeCount} alternative platform${alternativeCount === 1 ? '' : 's'} outside the selected focus.`
+              : 'No platform evidence was returned.',
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected error';
@@ -1461,6 +1600,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       });
     } finally {
       setPlatformCheckLoading(false);
+      completeAiProgress('platformCheck');
       if (didAttempt) {
         setPlatformCheckHasRun(true);
       }
@@ -1492,6 +1632,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
 
     try {
       setGeminiLoading(true);
+      startAiProgress('geminiSuggest');
       setGeminiSuggestionCount(null);
       setGeminiEvaluationCount(null);
       setGeminiDecisionMap({});
@@ -1504,6 +1645,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
         body: JSON.stringify({
           vendor,
           product,
+          description,
           aliases,
           platforms: selectedPlatformsList,
         }),
@@ -1527,6 +1669,13 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             ? decision.sourceUrl
             : typeof (decision as { source_url?: string }).source_url === 'string'
               ? (decision as { source_url?: string }).source_url
+              : undefined,
+          sourceUrlVerified: (decision as { sourceUrlVerified?: unknown; source_url_verified?: unknown }).sourceUrlVerified === true
+            || (decision as { sourceUrlVerified?: unknown; source_url_verified?: unknown }).source_url_verified === true
+            ? true
+            : (decision as { sourceUrlVerified?: unknown; source_url_verified?: unknown }).sourceUrlVerified === false
+              || (decision as { sourceUrlVerified?: unknown; source_url_verified?: unknown }).source_url_verified === false
+              ? false
               : undefined,
         };
       });
@@ -1587,6 +1736,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       });
     } finally {
       setGeminiLoading(false);
+      completeAiProgress('geminiSuggest');
     }
   };
 
@@ -1603,6 +1753,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
 
     try {
       setResearchLoading(true);
+      startAiProgress('research');
       setResearchResults(null);
       const response = await fetch('/api/ai/research/log-sources', {
         method: 'POST',
@@ -1640,6 +1791,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       });
     } finally {
       setResearchLoading(false);
+      completeAiProgress('research');
     }
   };
 
@@ -1670,6 +1822,9 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
         data_component_name: entry.dcName,
         target_fields: entry.targetFields || [],
         log_sources: entry.logSources.map((source) => ({
+          ...(source.verifiedByAi === false && source.sourceUrl
+            ? { notes: `${source.notes ? `${source.notes} ` : ''}Unverified source URL stored separately.`.trim() }
+            : { notes: source.notes }),
           name: source.name,
           channel: (() => {
             const channels = normalizeChannelArray(source.channel);
@@ -1678,8 +1833,8 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           required_fields: source.requiredFields || [],
           missing_fields: source.missingFields || [],
           evidence: source.evidence,
-          notes: source.notes,
-          source_url: source.sourceUrl,
+          source_url: source.verifiedByAi === false ? undefined : source.sourceUrl,
+          unverified_source_url: source.verifiedByAi === false ? source.sourceUrl : undefined,
           verified_by_ai: source.verifiedByAi === true ? true : source.verifiedByAi === false ? false : undefined,
         })),
       }));
@@ -1756,6 +1911,8 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     if (wizardContextOptions.length === 0) {
       const description = dataComponentsFallbackReason === 'no_platform_metadata'
         ? 'MITRE data components in this dataset have no platform metadata. Use "Show unscoped data components" to continue.'
+        : dataComponentsFallbackReason === 'no_detection_content'
+          ? 'No data components matched the selected platforms from MITRE detection content. Adjust platform selection or show unscoped data components.'
         : dataComponentsFallbackReason === 'graph_unavailable'
           ? 'The MITRE graph is unavailable. Initialize the dataset or show unscoped data components to continue.'
           : dataComponentsFallbackReason === 'no_platform_matches'
@@ -2128,15 +2285,18 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               )}
             </div>
 
-            <div className="flex gap-3 pt-4">
-              <Button variant="secondary" onClick={onCancel} className="flex-1">
-                Cancel
-              </Button>
-              <Button onClick={handleNextDetails} className="flex-1">
-                Continue
-                <ChevronRight className="w-4 h-4 ml-2" />
-              </Button>
-            </div>
+            {renderFooterSpacer()}
+            {renderFixedFooter(
+              <div className="flex gap-3">
+                <Button variant="secondary" onClick={onCancel} className="flex-1">
+                  Cancel
+                </Button>
+                <Button onClick={handleNextDetails} className="flex-1">
+                  Continue
+                  <ChevronRight className="w-4 h-4 ml-2" />
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </>
@@ -2165,6 +2325,8 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 {platforms.map(platform => {
                   const isSelected = selectedPlatforms.has(platform);
                   const description = PLATFORM_DESCRIPTIONS[platform] || 'General MITRE platform coverage.';
+                  const examples = PLATFORM_EXAMPLES[platform];
+                  const productExamples = PLATFORM_PRODUCT_EXAMPLES[platform];
                   return (
                     <button
                       key={platform}
@@ -2184,6 +2346,22 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                       )}>
                         {description}
                       </div>
+                      {examples && (
+                        <div className={cn(
+                          'text-[11px] mt-2 leading-snug',
+                          isSelected ? 'text-primary/70' : 'text-muted-foreground/90'
+                        )}>
+                          Examples: {examples}
+                        </div>
+                      )}
+                      {productExamples && (
+                        <div className={cn(
+                          'text-[11px] mt-1 leading-snug',
+                          isSelected ? 'text-primary/70' : 'text-muted-foreground/90'
+                        )}>
+                          Product examples: {productExamples}
+                        </div>
+                      )}
                     </button>
                   );
                 })}
@@ -2203,32 +2381,143 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               </div>
             )}
 
-            <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs text-muted-foreground space-y-2">
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  checked={platformCheckEnabled}
-                  onCheckedChange={(checked) => setPlatformCheckEnabled(checked === true)}
-                />
-                <span className="text-foreground">Run Gemini platform check</span>
-              </div>
-              <div>
-                Optional: verify your selected platforms against vendor documentation before moving forward.
-              </div>
+            <div className="space-y-3">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setPlatformCheckEnabled(true);
+                  void runPlatformCheck();
+                }}
+                disabled={platformCheckLoading}
+              >
+                {platformCheckLoading ? (
+                  <>
+                    <Loader2 className="w-3 h-3 animate-spin mr-2" />
+                    {selectedPlatforms.size === 0 ? 'Finding platforms...' : 'Validating platforms...'}
+                  </>
+                ) : platformCheckHasRun ? (
+                  'Re-run platform check'
+                ) : (
+                  selectedPlatforms.size === 0 ? 'Auto-select platforms with Gemini' : 'Validate platforms with Gemini'
+                )}
+              </Button>
+              {(platformCheckLoading || aiProgress.platformCheck > 0) && (
+                <div className="max-w-sm space-y-1">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>{platformCheckLoading ? 'Gemini platform check in progress' : 'Gemini platform check complete'}</span>
+                    <span>{Math.round(aiProgress.platformCheck)}%</span>
+                  </div>
+                  <Progress value={aiProgress.platformCheck} className="h-2" />
+                </div>
+              )}
+              
+              {platformCheckHasRun && (
+                <div className="rounded-lg border border-border/60 bg-background/60 p-4 space-y-3">
+                  <div className="text-xs font-semibold text-foreground">Platform check results</div>
+                  {platformCheckResults?.note && (
+                    <div className="text-xs text-muted-foreground">{platformCheckResults.note}</div>
+                  )}
+                  {platformCheckResults?.suggestedPlatforms && platformCheckResults.suggestedPlatforms.length > 0 && (
+                    <div className="text-xs text-blue-600">
+                      ✓ Suggested and auto-selected: {platformCheckResults.suggestedPlatforms.join(', ')}
+                    </div>
+                  )}
+                  {platformCheckSummary?.supported && platformCheckSummary.supported.length > 0 && (
+                    <div className="text-xs text-emerald-600">
+                      ✓ Supported: {platformCheckSummary.supported.join(', ')}
+                    </div>
+                  )}
+                  {platformCheckSummary?.unsupported && platformCheckSummary.unsupported.length > 0 && (
+                    <div className="text-xs text-amber-600">
+                      ⚠ Not supported by evidence: {platformCheckSummary.unsupported.join(', ')}
+                    </div>
+                  )}
+              {platformCheckSummary?.noEvidence && platformCheckSummary.noEvidence.length > 0 && (
+                <div className="text-xs text-amber-600">
+                  ? No evidence found for: {platformCheckSummary.noEvidence.join(', ')}
+                </div>
+              )}
+              {platformCheckResults?.suggestedPlatforms && platformCheckResults.suggestedPlatforms.length > 0 && (
+                <div className="text-xs text-blue-600">
+                  Suggested platforms: {platformCheckResults.suggestedPlatforms.join(', ')}
+                </div>
+              )}
+              {platformCheckAlternatives.length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  Alternative platform variants found: {platformCheckAlternatives.map((entry) => entry.platform).join(', ')}
+                </div>
+              )}
+                  
+                  {(platformCheckValidation.length > 0 || platformCheckAlternatives.length > 0) && (
+                    <details className="text-xs text-muted-foreground">
+                      <summary className="cursor-pointer font-semibold text-foreground">View evidence details</summary>
+                      <div className="mt-2 space-y-2">
+                        {platformCheckValidation.map((entry) => (
+                          <div key={`${entry.platform}-${entry.sourceUrl || entry.reasoning}`} className="space-y-1 pl-2 border-l-2 border-border">
+                            <div className="font-medium text-foreground">
+                              {entry.platform} — {entry.isSupported ? 'Supported' : 'Not supported'}
+                            </div>
+                            {entry.reasoning && <div>Reason: {entry.reasoning}</div>}
+                            {entry.evidence && <div>Evidence: {entry.evidence}</div>}
+                            {entry.sourceUrl && (
+                              <a
+                                href={entry.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-primary underline underline-offset-2"
+                              >
+                                {entry.sourceUrl}
+                              </a>
+                            )}
+                          </div>
+                        ))}
+                        {platformCheckAlternatives.length > 0 && (
+                          <div className="pt-2 space-y-2">
+                            <div className="font-semibold text-foreground">Alternative platforms</div>
+                            {platformCheckAlternatives.map((entry) => (
+                              <div key={`${entry.platform}-${entry.sourceUrl || entry.reason}`} className="space-y-1 pl-2 border-l-2 border-border">
+                                <div className="font-medium text-foreground">{entry.platform}</div>
+                                {entry.reason && <div>Reason: {entry.reason}</div>}
+                                {entry.evidence && <div>Evidence: {entry.evidence}</div>}
+                                {entry.sourceUrl && (
+                                  <a
+                                    href={entry.sourceUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="text-primary underline underline-offset-2"
+                                  >
+                                    {entry.sourceUrl}
+                                  </a>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>{selectedPlatforms.size} selected</span>
             </div>
 
-            <div className="flex gap-3 pt-4">
-              <Button variant="secondary" onClick={() => setStep('details')} className="flex-1">
-                Back
-              </Button>
-              <Button onClick={handleNextPlatforms} className="flex-1">
-                Continue
-                <ChevronRight className="w-4 h-4 ml-2" />
-              </Button>
-            </div>
+            {renderFooterSpacer()}
+            {renderFixedFooter(
+              <div className="flex gap-3">
+                <Button variant="secondary" onClick={() => setStep('details')} className="flex-1">
+                  Back
+                </Button>
+                <Button onClick={handleNextPlatforms} className="flex-1">
+                  Continue
+                  <ChevronRight className="w-4 h-4 ml-2" />
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </>
@@ -2236,13 +2525,6 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   }
 
   if (step === 'streams') {
-    const currentGroup = groupedDataComponents[guidedContextIndex];
-    const currentContext = currentGroup?.group;
-    const totalQuestions = currentGroup ? currentGroup.components.length : 0;
-    const isLastContext = wizardContextOptions.length > 0
-      && guidedContextIndex === wizardContextOptions.length - 1;
-    const nextLabel = isLastContext ? 'Review requirements' : 'Next platform';
-
     return (
       <>
         {renderStepper()}
@@ -2256,7 +2538,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           <CardContent className="space-y-6 pb-32">
             <div className="rounded-lg border border-border bg-muted/20 px-4 py-3 text-xs text-muted-foreground space-y-2">
               <p>
-                A Data Component is ATT&CK’s definition of a telemetry element that is used for detections to identify
+                A Data Component is ATT&CK's definition of a telemetry element that is used for detections to identify
                 specific techniques and sub-techniques of an attack (Usually its a log entry for e.g., Process Creation,
                 Network Connection Creation, User Account Authentication).
               </p>
@@ -2264,9 +2546,10 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 Select the components the data source can generate (usually a log) that can be collected.
               </p>
               <p>
-                Use the description and examples in each entry to decide; if you can’t collect it, leave it unchecked.
+                Use the description and examples in each entry to decide; if you can't collect it, leave it unchecked.
               </p>
             </div>
+            
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 type="button"
@@ -2278,12 +2561,23 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               >
                 {geminiLoading ? 'Mapping with Gemini...' : 'Auto-select with Gemini'}
               </Button>
+              {(geminiLoading || aiProgress.geminiSuggest > 0) && (
+                <div className="max-w-sm space-y-1">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
+                    <span>{geminiLoading ? 'Gemini mapping in progress' : 'Gemini mapping complete'}</span>
+                    <span>{Math.round(aiProgress.geminiSuggest)}%</span>
+                  </div>
+                  <Progress value={aiProgress.geminiSuggest} className="h-2" />
+                </div>
+              )}
             </div>
+            
             {geminiSuggestionCount !== null && (
               <div className="text-xs text-muted-foreground">
                 {`Gemini evaluated ${geminiEvaluationCount ?? dataComponents.length} of ${dataComponents.length} data components and selected ${geminiSuggestionCount}. Review before continuing.`}
               </div>
             )}
+            
             {geminiSuggestionCount !== null && (
               <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs text-muted-foreground space-y-2">
                 <div className="font-semibold text-foreground">Gemini mapping summary</div>
@@ -2318,17 +2612,20 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 )}
               </div>
             )}
+            
             {dataComponentsLoading && (
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 Loading MITRE data components...
               </div>
             )}
+            
             {dataComponentsError && (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
                 Unable to load MITRE data components. Ensure the MITRE graph is initialized.
               </div>
             )}
+            
             {canShowUnscopedToggle && !includeUnscopedDataComponents && (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 space-y-2">
                 <div>
@@ -2346,189 +2643,204 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 </Button>
               </div>
             )}
-            {dataComponentsFallbackReason === 'no_platform_matches' && !dataComponentsLoading && (
+            
+            {(dataComponentsFallbackReason === 'no_platform_matches' || dataComponentsFallbackReason === 'no_detection_content') && !dataComponentsLoading && (
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700">
                 No data components matched the selected platforms. Adjust your platform selection to continue.
               </div>
             )}
+            
             {dataComponentsMeta?.unscopedIncluded && (
               <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
                 Showing unscoped data components because platform metadata is unavailable.
               </div>
             )}
-            <div className="space-y-4">
-              {streams.slice(0, 1).map((stream, index) => (
-                <div key={`stream-${index}`} className="border border-border rounded-lg p-4 space-y-4 bg-background/40">
-                  {currentGroup ? (
-                    <div className="space-y-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="space-y-1">
-                          <div className="text-xs uppercase text-primary font-semibold tracking-wide">
-                            {currentGroup.group}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            Platform {guidedContextIndex + 1} of {wizardContextOptions.length}
-                          </div>
-                        </div>
-                        <Badge variant="outline" className="text-xs">
-                          {totalQuestions} data components
-                        </Badge>
-                      </div>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                        {currentGroup.components.map(component => {
-                          const isChecked = Boolean(stream.questionAnswers?.[component.id]);
-                          const description = component.shortDescription || component.description || '';
-                          const aiDecision = geminiDecisionMap[component.id];
-                          const aiSelected = Boolean(aiDecision?.selected);
-                          return (
-                            <label
-                              key={`${component.id}-${index}-${currentContext}`}
-                              className={cn(
-                                'flex flex-col gap-2 rounded-lg border p-3 text-xs sm:text-sm cursor-pointer transition-colors',
-                                isChecked
-                                  ? 'border-primary bg-primary/10 shadow-sm'
-                                  : component.relevanceScore
-                                    ? 'border-primary/30 bg-primary/5'
-                                    : 'border-border/60 bg-background/40 hover:bg-muted/30'
-                              )}
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="space-y-2">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <div className="text-sm font-semibold text-foreground">
-                                      Do the product/service generate a log for {component.name}?
-                                    </div>
-                                    <Badge variant="outline" className="text-[10px]">
-                                      {component.id}
-                                    </Badge>
-                                  </div>
-                                  {aiSelected && (
-                                    <Badge variant="secondary" className="text-[10px] w-fit">
-                                      AI Selected
-                                    </Badge>
-                                  )}
-                                </div>
-                                <Checkbox
-                                  checked={isChecked}
-                                  onCheckedChange={(checked) => {
-                                    const nextAnswers = { ...(stream.questionAnswers || {}) };
-                                    if (checked === true) {
-                                      nextAnswers[component.id] = true;
-                                    } else {
-                                      delete nextAnswers[component.id];
-                                    }
-                                    updateStreamGuided(index, { questionAnswers: nextAnswers });
-                                    applyGuidedMapping(index, nextAnswers);
-                                  }}
-                                />
-                              </div>
-                              {description && (
-                                <div className="text-xs text-muted-foreground">
-                                  {description}
-                                </div>
-                              )}
-                              {component.examples && component.examples.length > 0 && (
-                                <div className="text-xs text-muted-foreground">
-                                  <span className="font-semibold text-foreground">Common examples:</span>{' '}
-                                  {component.examples.join('; ')}
-                                </div>
-                              )}
-                              {aiSelected && (aiDecision?.reason || aiDecision?.evidence || aiDecision?.sourceUrl) && (
-                                <details className="rounded-md border border-primary/30 bg-primary/5 px-2 py-2 text-xs">
-                                  <summary
-                                    className="cursor-pointer font-semibold text-primary"
-                                    onClick={(event) => event.stopPropagation()}
-                                  >
-                                    AI evidence
-                                  </summary>
-                                  <div className="mt-2 space-y-1 text-muted-foreground">
-                                    {aiDecision?.reason && (
-                                      <div>
-                                        <span className="font-semibold text-foreground">Reason:</span> {aiDecision.reason}
-                                      </div>
-                                    )}
-                                    {aiDecision?.evidence && (
-                                      <div>
-                                        <span className="font-semibold text-foreground">Evidence:</span> {aiDecision.evidence}
-                                      </div>
-                                    )}
-                                    {aiDecision?.sourceUrl && (
-                                      <a
-                                        href={aiDecision.sourceUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="underline underline-offset-2 text-primary"
-                                        onClick={(event) => event.stopPropagation()}
-                                      >
-                                        {aiDecision.sourceUrl}
-                                      </a>
-                                    )}
-                                  </div>
-                                </details>
-                              )}
-                              {isChecked && (
-                                <InlineRequirementHint
-                                  dcNames={[component.name]}
-                                  enrichment={enrichmentByDcId[component.id.toLowerCase()]}
-                                />
-                              )}
-                            </label>
-                          );
-                        })}
-                        {currentGroup.components.length === 0 && (
-                          <div className="text-xs text-muted-foreground">
-                            {dataComponentsFallbackReason === 'no_platform_metadata'
-                              ? 'No platform metadata found for data components.'
-                              : dataComponentsFallbackReason === 'graph_unavailable'
-                                ? 'MITRE graph is unavailable, so data components cannot be filtered.'
-                                : dataComponentsFallbackReason === 'no_platform_matches'
-                                  ? 'No data components match the selected platforms.'
-                                  : 'No data components available for the selected platforms.'}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-xs text-muted-foreground">
-                      {dataComponentsFallbackReason === 'no_platform_metadata'
-                        ? 'No platform metadata found for data components.'
-                        : dataComponentsFallbackReason === 'graph_unavailable'
-                          ? 'MITRE graph is unavailable, so data components cannot be filtered.'
-                          : dataComponentsFallbackReason === 'no_platform_matches'
-                            ? 'No data components match the selected platforms.'
-                            : 'No data components match the selected platforms yet.'}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div className="sticky bottom-0 z-10 -mx-6 border-t border-border bg-background/95 px-6 py-4 backdrop-blur space-y-3">
-              <div className="text-xs text-muted-foreground">Selected data components</div>
-              {streams[0]?.mappedDataComponents.length > 0 ? (
-                <div className="flex flex-wrap gap-2">
-                  {streams[0].mappedDataComponents.map(component => (
-                    <Badge key={`selected-${component}`} variant="secondary">
-                      {formatDataComponentLabel(component)}
-                    </Badge>
-                  ))}
+            
+            <div className="space-y-6">
+              {visibleDataComponents.length === 0 ? (
+                <div className="text-sm text-muted-foreground text-center py-8">
+                  {dataComponentsFallbackReason === 'no_platform_metadata'
+                    ? 'No platform metadata found for data components.'
+                    : dataComponentsFallbackReason === 'no_detection_content'
+                      ? 'No data components matched the selected platforms from MITRE detection content.'
+                    : dataComponentsFallbackReason === 'graph_unavailable'
+                      ? 'MITRE graph is unavailable, so data components cannot be filtered.'
+                      : dataComponentsFallbackReason === 'no_platform_matches'
+                        ? 'No data components match the selected platforms.'
+                        : 'No data components available for the selected platforms.'}
                 </div>
               ) : (
-                <div className="text-xs text-muted-foreground">None selected yet.</div>
+                <div className="border border-border rounded-lg p-4 bg-background/40">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {visibleDataComponents.map(component => {
+                      const streamIndex = 0;
+                      const stream = streams[streamIndex];
+                      const isChecked = Boolean(stream?.questionAnswers?.[component.id]);
+                      const description = component.shortDescription || component.description || '';
+                      const aiDecision = geminiDecisionMap[component.id];
+                      const aiSelected = Boolean(aiDecision?.selected);
+                      const platformBadges = normalizePlatformList(
+                        Array.isArray(component.platforms)
+                          ? component.platforms.filter((platform) => typeof platform === 'string' && platform.trim().length > 0)
+                          : []
+                      );
+
+                      return (
+                        <label
+                          key={component.id}
+                          className={cn(
+                            'flex flex-col gap-2 rounded-lg p-3 text-xs sm:text-sm cursor-pointer transition-colors shadow-sm ring-1 ring-black/5 dark:ring-white/10',
+                            isChecked
+                              ? 'bg-primary/10 ring-primary/40 shadow-md'
+                              : component.relevanceScore
+                                ? 'bg-primary/5 ring-primary/20'
+                                : 'bg-muted/20 hover:bg-muted/30 hover:shadow-md'
+                          )}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="space-y-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <div className="text-sm font-semibold text-foreground">
+                                  Do the product/service generate a log for {component.name}?
+                                </div>
+                                <Badge variant="secondary" className="text-[10px] font-mono">
+                                  {component.id}
+                                </Badge>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {platformBadges.length > 0 ? platformBadges.map((platform) => (
+                                  <Badge key={`${component.id}-platform-${platform}`} variant="outline" className="text-[10px]">
+                                    {platform}
+                                  </Badge>
+                                )) : (
+                                  <Badge variant="outline" className="text-[10px]">Unspecified Platform</Badge>
+                                )}
+                              </div>
+                              {aiSelected && (
+                                <Badge variant="secondary" className="text-[10px] w-fit">
+                                  AI Selected
+                                </Badge>
+                              )}
+                            </div>
+                            <Checkbox
+                              checked={isChecked}
+                              onCheckedChange={(checked) => {
+                                const nextAnswers = { ...(stream?.questionAnswers || {}) };
+                                if (checked === true) {
+                                  nextAnswers[component.id] = true;
+                                } else {
+                                  delete nextAnswers[component.id];
+                                }
+                                updateStreamGuided(streamIndex, { questionAnswers: nextAnswers });
+                                applyGuidedMapping(streamIndex, nextAnswers);
+                              }}
+                            />
+                          </div>
+                          {description && (
+                            <div className="text-xs text-muted-foreground">
+                              {description}
+                            </div>
+                          )}
+                          {component.examples && component.examples.length > 0 && (
+                            <div className="text-xs text-muted-foreground">
+                              <span className="font-semibold text-foreground">Common examples:</span>{' '}
+                              {component.examples.join('; ')}
+                            </div>
+                          )}
+                          {aiSelected && (aiDecision?.reason || aiDecision?.evidence || aiDecision?.sourceUrl) && (
+                            <details className="rounded-md border border-primary/30 bg-primary/5 px-2 py-2 text-xs">
+                              <summary
+                                className="cursor-pointer font-semibold text-primary"
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                AI evidence
+                              </summary>
+                              <div className="mt-2 space-y-1 text-muted-foreground">
+                                {aiDecision?.reason && (
+                                  <div>
+                                    <span className="font-semibold text-foreground">Reason:</span> {aiDecision.reason}
+                                  </div>
+                                )}
+                                {aiDecision?.evidence && (
+                                  <div>
+                                    <span className="font-semibold text-foreground">Evidence:</span> {aiDecision.evidence}
+                                  </div>
+                                )}
+                                {aiDecision?.sourceUrl && (
+                                  <div className="space-y-1">
+                                    <a
+                                      href={aiDecision.sourceUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="underline underline-offset-2 text-primary"
+                                      onClick={(event) => event.stopPropagation()}
+                                    >
+                                      {aiDecision.sourceUrl}
+                                    </a>
+                                    {aiDecision?.sourceUrlVerified === false && (
+                                      <div className="text-amber-700">
+                                        Citation not grounding-verified. Review manually.
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </details>
+                          )}
+                          {isChecked && (
+                            <InlineRequirementHint
+                              dcNames={[component.name]}
+                              enrichment={enrichmentByDcId[component.id.toLowerCase()]}
+                            />
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
               )}
-              <div className="flex gap-3">
-                <Button variant="secondary" onClick={handleBackStreams} className="flex-1">
-                  {guidedContextIndex > 0 ? 'Previous platform' : 'Back'}
-                </Button>
-                <Button
-                  onClick={handleNextStreams}
-                  className="flex-1"
-                  disabled={isSubmitting || wizardContextOptions.length === 0}
-                >
-                  {nextLabel}
-                  <ChevronRight className="w-4 h-4 ml-2" />
-                </Button>
-              </div>
             </div>
+            
+            {renderFooterSpacer()}
+            {renderFixedFooter(
+              <div className="space-y-3">
+                <div className="text-xs text-muted-foreground">Selected data components</div>
+                {streams[0]?.mappedDataComponents.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {streams[0].mappedDataComponents.map(component => (
+                      <Badge key={`selected-${component}`} variant="secondary">
+                        {formatDataComponentLabel(component)}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-xs text-muted-foreground">None selected yet.</div>
+                )}
+                <div className="flex gap-3">
+                  <Button variant="secondary" onClick={() => setStep('auto-results')} className="flex-1">
+                    Back
+                  </Button>
+                  <Button
+                    onClick={() => {
+                      if (!hasConfiguredStreams) {
+                        toast({
+                          title: 'Select at least one data component',
+                          description: 'Choose at least one data component so we can map coverage.',
+                          variant: 'destructive',
+                        });
+                        return;
+                      }
+                      setStep('guided-summary');
+                    }}
+                    className="flex-1"
+                    disabled={isSubmitting || wizardContextOptions.length === 0}
+                  >
+                    Review requirements
+                    <ChevronRight className="w-4 h-4 ml-2" />
+                  </Button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       </>
@@ -2599,6 +2911,15 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             >
               {researchLoading ? 'Researching online sources...' : 'Experimental: Research log sources'}
             </Button>
+            {(researchLoading || aiProgress.research > 0) && (
+              <div className="max-w-sm space-y-1">
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{researchLoading ? 'Gemini research in progress' : 'Gemini research complete'}</span>
+                  <span>{Math.round(aiProgress.research)}%</span>
+                </div>
+                <Progress value={aiProgress.research} className="h-2" />
+              </div>
+            )}
           </div>
 
           {researchResults && (
@@ -2635,18 +2956,21 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             </div>
           )}
 
-          <div className="flex gap-3 pt-2">
-            <Button variant="secondary" onClick={() => setStep('streams')} className="flex-1">
-              Back
-            </Button>
-            <Button
-              onClick={handleSaveGuidedCoverage}
-              className="flex-1"
-              disabled={isSubmitting || !hasConfiguredStreams}
-            >
-              {isSubmitting ? 'Mapping...' : 'Continue & Map'}
-            </Button>
-          </div>
+          {renderFooterSpacer()}
+          {renderFixedFooter(
+            <div className="flex gap-3">
+              <Button variant="secondary" onClick={() => setStep('streams')} className="flex-1">
+                Back
+              </Button>
+              <Button
+                onClick={handleSaveGuidedCoverage}
+                className="flex-1"
+                disabled={isSubmitting || !hasConfiguredStreams}
+              >
+                {isSubmitting ? 'Mapping...' : 'Continue & Map'}
+              </Button>
+            </div>
+          )}
         </div>
       </>
     );
@@ -2692,6 +3016,11 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               )}
               {!platformCheckLoading && platformCheckResults?.note && (
                 <div className="text-xs text-muted-foreground">{platformCheckResults.note}</div>
+              )}
+              {platformCheckResults?.suggestedPlatforms && platformCheckResults.suggestedPlatforms.length > 0 && (
+                <div className="text-xs text-blue-600">
+                  Suggested platforms: {platformCheckResults.suggestedPlatforms.join(', ')}
+                </div>
               )}
               {platformCheckSummary?.supported.length ? (
                 <div className="text-xs text-emerald-600">
@@ -2768,18 +3097,21 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               ) : null}
             </div>
 
-            <div className="flex gap-3 pt-4">
-              <Button
-                variant="secondary"
-                onClick={() => setStep(platformCheckEnabled ? 'platform-review' : 'platforms')}
-                className="flex-1"
-              >
-                Back
-              </Button>
-              <Button onClick={() => setStep('review')} className="flex-1">
-                Continue
-              </Button>
-            </div>
+            {renderFooterSpacer()}
+            {renderFixedFooter(
+              <div className="flex gap-3">
+                <Button
+                  variant="secondary"
+                  onClick={() => setStep('platforms')}
+                  className="flex-1"
+                >
+                  Back
+                </Button>
+                <Button onClick={() => setStep('review')} className="flex-1">
+                  Continue
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -2825,13 +3157,29 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             <div className="space-y-2">
               <div className="text-xs text-muted-foreground">Platforms</div>
               <div className="flex flex-wrap gap-2">
-                {selectedPlatformsList.map(platform => (
-                  <Badge key={platform} variant="secondary">
-                    {platform}
-                  </Badge>
-                ))}
+                {selectedPlatformsList.length === 0 ? (
+                  <span className="text-sm text-muted-foreground">None selected</span>
+                ) : (
+                  selectedPlatformsList.map(platform => (
+                    <Badge key={platform} variant="secondary">
+                      {platform}
+                    </Badge>
+                  ))
+                )}
               </div>
             </div>
+            {platformCheckResults?.suggestedPlatforms && platformCheckResults.suggestedPlatforms.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground">Platform check suggestions</div>
+                <div className="flex flex-wrap gap-2">
+                  {platformCheckResults.suggestedPlatforms.map(platform => (
+                    <Badge key={`suggested-${platform}`} variant="secondary" className="text-blue-600">
+                      {platform}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="space-y-2">
               <div className="text-xs text-muted-foreground">Data components selected</div>
               <div className="text-sm text-foreground">
@@ -2847,14 +3195,17 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               <span className="text-foreground">Run evidence review after Auto Map</span>
             </div>
 
-            <div className="flex gap-3 pt-4">
-              <Button variant="secondary" onClick={() => setStep('platforms')} className="flex-1">
-                Back
-              </Button>
-              <Button onClick={handleAutoMap} className="flex-1" disabled={isSubmitting}>
-                Auto Map
-              </Button>
-            </div>
+            {renderFooterSpacer()}
+            {renderFixedFooter(
+              <div className="flex gap-3">
+                <Button variant="secondary" onClick={() => setStep('platform-review')} className="flex-1">
+                  Back
+                </Button>
+                <Button onClick={handleAutoMap} className="flex-1" disabled={isSubmitting}>
+                  Auto Map
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>
@@ -2941,14 +3292,17 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               </div>
             )}
 
-            <div className="flex gap-3 pt-2">
-              <Button variant="secondary" onClick={() => setStep('review')} className="flex-1">
-                Back
-              </Button>
-              <Button onClick={() => setStep(autoResultsNextStep)} className="flex-1">
-                {autoResultsNextStep === 'streams' ? 'Continue to Telemetry' : 'Finish'}
-              </Button>
-            </div>
+            {renderFooterSpacer()}
+            {renderFixedFooter(
+              <div className="flex gap-3">
+                <Button variant="secondary" onClick={() => setStep('review')} className="flex-1">
+                  Back
+                </Button>
+                <Button onClick={() => setStep(autoResultsNextStep)} className="flex-1">
+                  {autoResultsNextStep === 'streams' ? 'Continue to Telemetry' : 'Finish'}
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </>
@@ -3101,14 +3455,19 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             })}
 
             {evidenceFormExpanded && (
-              <div className="flex gap-3 pt-4">
-                <Button variant="secondary" onClick={() => setStep('complete')} className="flex-1">
-                  Skip for now
-                </Button>
-                <Button onClick={handleSaveEvidence} className="flex-1" disabled={isSubmitting}>
-                  {isSubmitting ? 'Saving...' : 'Save & Continue'}
-                </Button>
-              </div>
+              <>
+                {renderFooterSpacer()}
+                {renderFixedFooter(
+                  <div className="flex gap-3">
+                    <Button variant="secondary" onClick={() => setStep('complete')} className="flex-1">
+                      Skip for now
+                    </Button>
+                    <Button onClick={handleSaveEvidence} className="flex-1" disabled={isSubmitting}>
+                      {isSubmitting ? 'Saving...' : 'Save & Continue'}
+                    </Button>
+                  </div>
+                )}
+              </>
             )}
           </CardContent>
         </Card>
@@ -3169,18 +3528,21 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
               </div>
             )}
 
-            <div className="flex gap-3 pt-2">
-              <Button variant="secondary" onClick={() => setStep('streams')} className="flex-1">
-                Back
-              </Button>
-              <Button
-                onClick={() => createdProductId && onComplete(createdProductId)}
-                className="flex-1"
-                disabled={!createdProductId}
-              >
-                View product
-              </Button>
-            </div>
+            {renderFooterSpacer()}
+            {renderFixedFooter(
+              <div className="flex gap-3">
+                <Button variant="secondary" onClick={() => setStep('streams')} className="flex-1">
+                  Back
+                </Button>
+                <Button
+                  onClick={() => createdProductId && onComplete(createdProductId)}
+                  className="flex-1"
+                  disabled={!createdProductId}
+                >
+                  View product
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       </>

@@ -1,8 +1,8 @@
-# OpenTidal - Threat-Informed Defense Platform
+# Antikythera - Threat-Informed Defense Platform
 
 ## Overview
 
-OpenTidal is a self-hosted, open-source threat-informed defense platform designed as an alternative to Tidal Cyber. The application enables security teams to map security products to MITRE ATT&CK techniques, visualize defensive coverage against specific threat groups, and use AI to infer protection capabilities from product documentation.
+Antikythera is a self-hosted, open-source threat-informed defense platform designed as an alternative to Tidal Cyber. The application enables security teams to map security products to MITRE ATT&CK techniques, visualize defensive coverage against specific threat groups, and use AI to infer protection capabilities from product documentation.
 
 The platform follows a modern full-stack architecture with a React frontend, Express backend, and PostgreSQL database, all designed to run in a containerized environment alongside MITRE ATT&CK Workbench.
 

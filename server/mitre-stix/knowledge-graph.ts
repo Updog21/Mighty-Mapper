@@ -138,6 +138,27 @@ interface LogRequirement {
   dataSourceName: string;
 }
 
+interface ProcedureSourceInfo {
+  stixId: string;
+  name: string;
+  type: string;
+  url?: string;
+}
+
+interface MitigationInfo {
+  stixId: string;
+  id: string;
+  name: string;
+  description: string;
+}
+
+interface TechniqueProcedureExample {
+  sourceName: string;
+  sourceType: string;
+  description: string;
+  url?: string;
+}
+
 export class MitreKnowledgeGraph {
   private stixUrl = 'https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json';
   private carUrl = 'https://raw.githubusercontent.com/mitre-attack/car/master/docs/data/analytics.json';
@@ -163,6 +184,10 @@ export class MitreKnowledgeGraph {
   private dataComponentToAnalytics: Map<string, string[]> = new Map(); // Reverse lookup for Tier 2 inference
 
   private techniqueToCarAnalytics: Map<string, CarAnalytic[]> = new Map();
+  private mitigationMap: Map<string, MitigationInfo> = new Map();
+  private procedureSourceMap: Map<string, ProcedureSourceInfo> = new Map();
+  private techniqueToProcedureExamples: Map<string, TechniqueProcedureExample[]> = new Map();
+  private techniqueToMitigations: Map<string, MitigationInfo[]> = new Map();
 
   private dataComponentIdIndex: Map<string, string> = new Map();
   private dataComponentNameIndex: Map<string, Set<string>> = new Map();
@@ -475,6 +500,33 @@ export class MitreKnowledgeGraph {
             this.techniquePhaseMap.set(stixObj.id, phases);
           }
           break;
+
+        case 'course-of-action':
+          if (externalId) {
+            this.mitigationMap.set(stixObj.id, {
+              stixId: stixObj.id,
+              id: externalId,
+              name: stixObj.name || externalId,
+              description: stixObj.description || '',
+            });
+          }
+          break;
+
+        case 'intrusion-set':
+        case 'malware':
+        case 'tool':
+        case 'campaign': {
+          const firstUrl = Array.isArray(stixObj.external_references)
+            ? stixObj.external_references.find((ref) => typeof ref.url === 'string' && ref.url.trim().length > 0)?.url
+            : undefined;
+          this.procedureSourceMap.set(stixObj.id, {
+            stixId: stixObj.id,
+            name: stixObj.name || stixObj.id,
+            type: stixObj.type,
+            url: firstUrl,
+          });
+          break;
+        }
           
         case 'x-mitre-detection-strategy':
           if (externalId) {
@@ -685,6 +737,59 @@ export class MitreKnowledgeGraph {
           if (wasAdded) {
             this.hasStixDetectsRelationships = true;
             stixDetectsEdges += 1;
+          }
+        }
+      }
+
+      if (rel.relationship_type === 'uses') {
+        const sourceIsTechnique = this.techniqueByStixId.has(rel.source_ref);
+        const targetIsTechnique = this.techniqueByStixId.has(rel.target_ref);
+        const sourceProcedure = this.procedureSourceMap.get(rel.source_ref);
+        const targetProcedure = this.procedureSourceMap.get(rel.target_ref);
+
+        let technique: TechniqueInfo | null = null;
+        let procedure: ProcedureSourceInfo | undefined;
+        if (targetIsTechnique && sourceProcedure) {
+          technique = this.findTechniqueByStixId(rel.target_ref);
+          procedure = sourceProcedure;
+        } else if (sourceIsTechnique && targetProcedure) {
+          technique = this.findTechniqueByStixId(rel.source_ref);
+          procedure = targetProcedure;
+        }
+
+        if (technique && procedure) {
+          if (!this.techniqueToProcedureExamples.has(technique.id)) {
+            this.techniqueToProcedureExamples.set(technique.id, []);
+          }
+          const examples = this.techniqueToProcedureExamples.get(technique.id)!;
+          const next: TechniqueProcedureExample = {
+            sourceName: procedure.name,
+            sourceType: procedure.type,
+            description: rel.description || '',
+            url: procedure.url,
+          };
+          const exists = examples.some((item) =>
+            item.sourceName === next.sourceName
+            && item.sourceType === next.sourceType
+            && item.description === next.description
+          );
+          if (!exists) {
+            examples.push(next);
+          }
+        }
+      }
+
+      if (rel.relationship_type === 'mitigates') {
+        const sourceMitigation = this.mitigationMap.get(rel.source_ref);
+        const targetTechnique = this.findTechniqueByStixId(rel.target_ref);
+        if (sourceMitigation && targetTechnique) {
+          if (!this.techniqueToMitigations.has(targetTechnique.id)) {
+            this.techniqueToMitigations.set(targetTechnique.id, []);
+          }
+          const mitigations = this.techniqueToMitigations.get(targetTechnique.id)!;
+          const exists = mitigations.some((item) => item.id === sourceMitigation.id);
+          if (!exists) {
+            mitigations.push(sourceMitigation);
           }
         }
       }
@@ -1005,9 +1110,9 @@ export class MitreKnowledgeGraph {
         direct.forEach(id => matches.add(id));
         return;
       }
-      for (const [candidateKey, ids] of index) {
+      for (const [candidateKey, ids] of Array.from(index)) {
         if (candidateKey.includes(key) || key.includes(candidateKey)) {
-          ids.forEach(id => matches.add(id));
+          ids.forEach((id: string) => matches.add(id));
         }
       }
     };
@@ -1446,6 +1551,165 @@ export class MitreKnowledgeGraph {
     return techniques;
   }
 
+  /**
+   * Get all techniques with expanded MITRE relationships.
+   */
+  getAllTechniquesDetailed(): Array<{
+    id: string;
+    name: string;
+    description: string;
+    platforms: string[];
+    tactics: string[];
+    dataSources: string[];
+    detection: string;
+    strategies: Array<{ id: string; name: string }>;
+    analytics: Array<{ id: string; name: string; platforms: string[] }>;
+    dataComponents: Array<{ id: string; name: string; dataSourceName: string }>;
+  }> {
+    const results = Array.from(this.techniqueMap.values())
+      .map((technique) => {
+        const strategyStixIds = this.getStrategiesForTechniqueWithFallback(technique.id);
+        const strategies = strategyStixIds
+          .map((strategyStixId) => this.strategyMap.get(strategyStixId))
+          .filter((strategy): strategy is StrategyInfo => Boolean(strategy))
+          .map((strategy) => ({
+            id: strategy.id,
+            name: strategy.name,
+            stixId: strategy.stixId,
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id));
+
+        const analyticsById = new Map<string, { id: string; name: string; platforms: string[]; stixId: string }>();
+        const dataComponentsById = new Map<string, { id: string; name: string; dataSourceName: string }>();
+
+        for (const strategy of strategies) {
+          const analyticStixIds = this.strategyToAnalytics.get(strategy.stixId) || [];
+          for (const analyticStixId of analyticStixIds) {
+            const analytic = this.analyticMap.get(analyticStixId);
+            if (!analytic) continue;
+
+            if (!analyticsById.has(analytic.id)) {
+              analyticsById.set(analytic.id, {
+                id: analytic.id,
+                name: analytic.name,
+                platforms: Array.isArray(analytic.platforms) ? analytic.platforms : [],
+                stixId: analytic.stixId,
+              });
+            }
+
+            for (const dcStixId of analytic.dataComponentRefs) {
+              const dc = this.dataComponentMap.get(dcStixId);
+              if (!dc) continue;
+              if (!dataComponentsById.has(dc.id)) {
+                dataComponentsById.set(dc.id, {
+                  id: dc.id,
+                  name: dc.name,
+                  dataSourceName: dc.dataSourceName || "Uncategorized",
+                });
+              }
+            }
+          }
+        }
+
+        return {
+          id: technique.id,
+          name: technique.name,
+          description: technique.description || "",
+          platforms: Array.isArray(technique.platforms) ? technique.platforms : [],
+          tactics: Array.isArray(technique.tactics) ? technique.tactics : [],
+          dataSources: Array.isArray(technique.dataSources) ? technique.dataSources : [],
+          detection: technique.detection || "",
+          strategies: strategies.map((strategy) => ({ id: strategy.id, name: strategy.name })),
+          analytics: Array.from(analyticsById.values())
+            .map((analytic) => ({ id: analytic.id, name: analytic.name, platforms: analytic.platforms }))
+            .sort((a, b) => a.id.localeCompare(b.id)),
+          dataComponents: Array.from(dataComponentsById.values()).sort((a, b) => a.id.localeCompare(b.id)),
+        };
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    return results;
+  }
+
+  private getSubTechniquesForTechnique(techniqueId: string): TechniqueInfo[] {
+    const normalized = techniqueId.toUpperCase();
+    if (!normalized) return [];
+    return Array.from(this.techniqueMap.values())
+      .filter((technique) => technique.id.toUpperCase().startsWith(`${normalized}.`))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  getTechniqueDetail(techniqueId: string): {
+    id: string;
+    name: string;
+    description: string;
+    platforms: string[];
+    tactics: string[];
+    subTechniques: Array<{
+      id: string;
+      name: string;
+      description: string;
+      platforms: string[];
+      tactics: string[];
+    }>;
+    procedureExamples: Array<{
+      sourceName: string;
+      sourceType: string;
+      description: string;
+      url?: string;
+    }>;
+    detectionStrategies: Array<{ id: string; name: string }>;
+    mitigations: Array<{ id: string; name: string; description: string }>;
+  } | null {
+    const normalized = this.normalizeTechniqueIdValue(techniqueId);
+    if (!normalized) return null;
+    const technique = this.techniqueMap.get(normalized);
+    if (!technique) return null;
+
+    const strategyStixIds = this.getStrategiesForTechniqueWithFallback(normalized);
+    const detectionStrategies = strategyStixIds
+      .map((strategyStixId) => this.strategyMap.get(strategyStixId))
+      .filter((strategy): strategy is StrategyInfo => Boolean(strategy))
+      .map((strategy) => ({ id: strategy.id, name: strategy.name }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    const procedureExamples = (this.techniqueToProcedureExamples.get(normalized) || [])
+      .slice()
+      .sort((a, b) => {
+        const bySource = a.sourceName.localeCompare(b.sourceName);
+        if (bySource !== 0) return bySource;
+        return a.description.localeCompare(b.description);
+      });
+
+    const mitigations = (this.techniqueToMitigations.get(normalized) || [])
+      .map((mitigation) => ({
+        id: mitigation.id,
+        name: mitigation.name,
+        description: mitigation.description,
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    const subTechniques = this.getSubTechniquesForTechnique(normalized).map((subTechnique) => ({
+      id: subTechnique.id,
+      name: subTechnique.name,
+      description: subTechnique.description || '',
+      platforms: Array.isArray(subTechnique.platforms) ? subTechnique.platforms : [],
+      tactics: Array.isArray(subTechnique.tactics) ? subTechnique.tactics : [],
+    }));
+
+    return {
+      id: technique.id,
+      name: technique.name,
+      description: technique.description || '',
+      platforms: Array.isArray(technique.platforms) ? technique.platforms : [],
+      tactics: Array.isArray(technique.tactics) ? technique.tactics : [],
+      subTechniques,
+      procedureExamples,
+      detectionStrategies,
+      mitigations,
+    };
+  }
+
   getDataComponentsForPlatformsViaTechniques(platforms: string[]): DataComponentInfo[] {
     const normalizedPlatforms = normalizePlatformList(platforms);
     if (normalizedPlatforms.length === 0) {
@@ -1730,6 +1994,152 @@ export class MitreKnowledgeGraph {
    */
   getAllDataComponents(): DataComponentInfo[] {
     return Array.from(this.dataComponentMap.values());
+  }
+
+  /**
+   * Get all detection strategies with expanded MITRE relationships.
+   */
+  getAllDetectionStrategiesDetailed(): Array<{
+    id: string;
+    name: string;
+    description: string;
+    techniques: Array<{ id: string; name: string }>;
+    analytics: Array<{
+      id: string;
+      name: string;
+      platforms: string[];
+      dataComponents: Array<{ id: string; name: string }>;
+    }>;
+    dataComponents: Array<{ id: string; name: string; dataSourceName: string }>;
+  }> {
+    const strategies = Array.from(this.strategyMap.values())
+      .map((strategy) => {
+        const techniques = Array.from(new Set(
+          (strategy.techniques || [])
+            .map((techniqueId) => (typeof techniqueId === "string" ? techniqueId.trim().toUpperCase() : ""))
+            .filter(Boolean)
+        ))
+          .map((techniqueId) => ({
+            id: techniqueId,
+            name: this.techniqueMap.get(techniqueId)?.name || techniqueId,
+          }))
+          .sort((a, b) => a.id.localeCompare(b.id));
+
+        const analyticStixIds = this.strategyToAnalytics.get(strategy.stixId) || [];
+        const seenDataComponents = new Map<string, { id: string; name: string; dataSourceName: string }>();
+
+        const analytics = analyticStixIds
+          .map((analyticStixId) => this.analyticMap.get(analyticStixId))
+          .filter((analytic): analytic is AnalyticInfo => Boolean(analytic))
+          .map((analytic) => {
+            const dcRefs = analytic.dataComponentRefs
+              .map((dcStixId) => this.dataComponentMap.get(dcStixId))
+              .filter((dc): dc is DataComponentInfo => Boolean(dc))
+              .map((dc) => {
+                if (!seenDataComponents.has(dc.id)) {
+                  seenDataComponents.set(dc.id, {
+                    id: dc.id,
+                    name: dc.name,
+                    dataSourceName: dc.dataSourceName || "Uncategorized",
+                  });
+                }
+                return { id: dc.id, name: dc.name };
+              })
+              .sort((a, b) => a.id.localeCompare(b.id));
+
+            return {
+              id: analytic.id,
+              name: analytic.name,
+              platforms: Array.isArray(analytic.platforms) ? analytic.platforms : [],
+              dataComponents: dcRefs,
+            };
+          })
+          .sort((a, b) => a.id.localeCompare(b.id));
+
+        return {
+          id: strategy.id,
+          name: strategy.name,
+          description: strategy.description || "",
+          techniques,
+          analytics,
+          dataComponents: Array.from(seenDataComponents.values()).sort((a, b) => a.id.localeCompare(b.id)),
+        };
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    return strategies;
+  }
+
+  /**
+   * Get detection strategies that reference a data component through analytics.
+   */
+  getDetectionStrategiesForDataComponent(dataComponentIdOrName: string): Array<{
+    id: string;
+    name: string;
+    techniques: Array<{ id: string; name: string }>;
+  }> {
+    const trimmed = typeof dataComponentIdOrName === "string" ? dataComponentIdOrName.trim() : "";
+    if (!trimmed) return [];
+
+    let targetDcStixId: string | null = null;
+    const directId = this.dataComponentIdIndex.get(trimmed.toUpperCase());
+    if (directId) {
+      targetDcStixId = directId;
+    } else if (this.dataComponentMap.has(trimmed)) {
+      targetDcStixId = trimmed;
+    } else {
+      const normalized = this.normalizeName(trimmed);
+      this.dataComponentMap.forEach((dc, stixId) => {
+        if (!targetDcStixId && this.normalizeName(dc.name) === normalized) {
+          targetDcStixId = stixId;
+        }
+      });
+      if (!targetDcStixId) {
+        this.dataComponentMap.forEach((dc, stixId) => {
+          if (targetDcStixId) return;
+          const dcName = this.normalizeName(dc.name);
+          if (dcName.includes(normalized) || normalized.includes(dcName)) {
+            targetDcStixId = stixId;
+          }
+        });
+      }
+    }
+
+    if (!targetDcStixId) return [];
+
+    const analyticStixIds = this.dataComponentToAnalytics.get(targetDcStixId) || [];
+    if (analyticStixIds.length === 0) return [];
+
+    const strategyStixIds = new Set<string>();
+    for (const analyticStixId of analyticStixIds) {
+      const strategyRefs = this.analyticToStrategies.get(analyticStixId) || [];
+      for (const strategyStixId of strategyRefs) {
+        strategyStixIds.add(strategyStixId);
+      }
+    }
+
+    const results = Array.from(strategyStixIds)
+      .map((strategyStixId) => this.strategyMap.get(strategyStixId))
+      .filter((strategy): strategy is StrategyInfo => Boolean(strategy))
+      .map((strategy) => {
+        const techniques = Array.from(new Set(
+          (strategy.techniques || [])
+            .map((techniqueId) => (typeof techniqueId === "string" ? techniqueId.trim().toUpperCase() : ""))
+            .filter(Boolean)
+        )).map((techniqueId) => ({
+          id: techniqueId,
+          name: this.techniqueMap.get(techniqueId)?.name || techniqueId,
+        }));
+
+        return {
+          id: strategy.id,
+          name: strategy.name,
+          techniques,
+        };
+      })
+      .sort((a, b) => a.id.localeCompare(b.id));
+
+    return results;
   }
 
   /**

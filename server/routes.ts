@@ -70,12 +70,48 @@ export async function registerRoutes(
 
   const UI_PLATFORM_OPTIONS = PLATFORM_VALUES;
 
+  const attachLogSources = async <T extends { id: string; name: string }>(components: T[]) => {
+    if (!components.length) return components;
+    let stored = await storage.getDataComponentsByComponentIds(components.map((component) => component.id));
+    if (stored.length === 0) {
+      stored = await storage.getAllDataComponents();
+    }
+    const byId = new Map(stored.map((item) => [item.componentId.toLowerCase(), item.logSources || []]));
+    const byName = new Map(stored.map((item) => [item.name.toLowerCase(), item.logSources || []]));
+    return components.map((component) => ({
+      ...component,
+      logSources: byId.get(component.id.toLowerCase()) || byName.get(component.name.toLowerCase()) || [],
+    }));
+  };
+
+  const attachDetectionStrategies = <T extends { id: string; name: string }>(components: T[]) => {
+    if (!components.length) return components;
+    return components.map((component) => ({
+      ...component,
+      detectionStrategies: mitreKnowledgeGraph.getDetectionStrategiesForDataComponent(component.id),
+    }));
+  };
+
   const getDataComponentsForPlatforms = async (
     platforms: string[],
     includeDeprecated: boolean,
     includeUnscoped: boolean
   ) => {
     const normalizedPlatforms = normalizePlatformList(platforms);
+    let mappedComponentIds: Set<string> | null = null;
+    let mappingAvailable = false;
+    if (normalizedPlatforms.length > 0) {
+      try {
+        const mappingCount = await storage.getDataComponentPlatformCount();
+        if (mappingCount > 0) {
+          mappingAvailable = true;
+          const ids = await storage.getDataComponentIdsForPlatforms(normalizedPlatforms);
+          mappedComponentIds = new Set(ids.map((id) => id.toLowerCase()));
+        }
+      } catch (error) {
+        console.warn("Failed to load data component platform map, falling back to graph traversal.", error);
+      }
+    }
     let graphReady = true;
     try {
       await mitreKnowledgeGraph.ensureInitialized();
@@ -97,11 +133,40 @@ export async function registerRoutes(
       fallbackReason = "graph_unavailable";
       filtered = [];
     } else if (graphReady && normalizedPlatforms.length > 0) {
-      const derived = mitreKnowledgeGraph
+      // Always include graph-derived matches, even when a persisted platform map exists.
+      // The persisted map can be stale/incomplete; merging prevents false empty results.
+      const derivedFromMap = mappingAvailable && mappedComponentIds
+        ? baseComponents.filter((dc) => mappedComponentIds.has(dc.id.toLowerCase()))
+        : [];
+      const derivedFromGraph = mitreKnowledgeGraph
         .getDataComponentsForPlatformsViaTechniques(normalizedPlatforms)
         .filter((dc) => includeDeprecated || (!dc.revoked && !dc.deprecated));
-      filtered = derived;
-      if (derived.length === 0) {
+      const derivedById = new Map<string, typeof baseComponents[number]>();
+      derivedFromMap.forEach((dc) => derivedById.set(dc.id.toLowerCase(), dc));
+      derivedFromGraph.forEach((dc) => {
+        if (!derivedById.has(dc.id.toLowerCase())) {
+          derivedById.set(dc.id.toLowerCase(), dc);
+        }
+      });
+      const derived = Array.from(derivedById.values());
+
+      // Include direct ATT&CK platform-tag matches as a secondary signal.
+      // This avoids empty platform groups when technique-linked detection content is sparse.
+      const directMatches = baseComponents.filter((dc) => {
+        const platformList = Array.isArray(dc.platforms) ? dc.platforms : [];
+        if (platformList.length === 0) return false;
+        return platformMatchesAny(platformList, normalizedPlatforms);
+      });
+      const mergedById = new Map<string, typeof baseComponents[number]>();
+      derived.forEach((dc) => mergedById.set(dc.id.toLowerCase(), dc));
+      directMatches.forEach((dc) => {
+        if (!mergedById.has(dc.id.toLowerCase())) {
+          mergedById.set(dc.id.toLowerCase(), dc);
+        }
+      });
+      filtered = Array.from(mergedById.values());
+
+      if (filtered.length === 0) {
         fallbackReason = "no_detection_content";
         if (includeUnscoped) {
           filtered = baseComponents;
@@ -161,9 +226,9 @@ export async function registerRoutes(
             description,
             shortDescription: buildShortDescription(description),
             examples: extractExamples(description),
-            dataSourceId: dc.dataSourceId || undefined,
-            dataSourceName: dc.dataSourceName || undefined,
-            platforms: [],
+            dataSourceId: dc.dataSourceId || "",
+            dataSourceName: dc.dataSourceName || "",
+            platforms: [] as string[],
             domains: dc.domains || [],
             revoked: dc.revoked,
             deprecated: dc.deprecated,
@@ -172,6 +237,9 @@ export async function registerRoutes(
         });
       unscopedIncluded = true;
     }
+
+    components = await attachLogSources(components);
+    components = attachDetectionStrategies(components);
 
     return {
       components,
@@ -364,7 +432,7 @@ export async function registerRoutes(
         const mapped = Array.isArray((stream as { mappedDataComponents?: unknown }).mappedDataComponents)
           ? (stream as { mappedDataComponents?: unknown[] }).mappedDataComponents
           : [];
-        mapped.forEach((item) => {
+        (mapped || []).forEach((item) => {
           if (typeof item === "string" && item.trim()) {
             dataComponentHints.add(item.trim());
           }
@@ -667,8 +735,25 @@ export async function registerRoutes(
   // Get all data components
   app.get("/api/data-components", async (req, res) => {
     try {
-      const key = buildCacheKey(["data-components"]);
-      await respondWithCache(key, 5 * 60 * 1000, () => storage.getAllDataComponents(), res);
+      const rawPlatforms = typeof req.query.platforms === "string"
+        ? req.query.platforms
+        : typeof req.query.platform === "string"
+          ? req.query.platform
+          : "";
+      const platforms = rawPlatforms
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const normalizedPlatforms = normalizePlatformList(platforms);
+      const key = buildCacheKey(["data-components", normalizedPlatforms.join("|") || "all"]);
+      await respondWithCache(key, 5 * 60 * 1000, async () => {
+        if (normalizedPlatforms.length === 0) {
+          return storage.getAllDataComponents();
+        }
+        const ids = await storage.getDataComponentIdsForPlatforms(normalizedPlatforms);
+        if (ids.length === 0) return [];
+        return storage.getDataComponentsByComponentIds(ids);
+      }, res);
     } catch (error) {
       console.error("Error fetching data components:", error);
       res.status(500).json({ error: "Failed to fetch data components" });
@@ -1054,6 +1139,116 @@ export async function registerRoutes(
     }
   });
 
+  app.get("/api/mitre/detection-strategies", async (_req, res) => {
+    try {
+      const cacheKey = buildCacheKey(["mitre-detection-strategies"]);
+      await respondWithCache(
+        cacheKey,
+        5 * 60 * 1000,
+        async () => {
+          let graphReady = true;
+          try {
+            await mitreKnowledgeGraph.ensureInitialized();
+          } catch (error) {
+            graphReady = false;
+            console.warn("MITRE graph unavailable for detection strategies, falling back to stored strategies.", error);
+          }
+
+          if (graphReady) {
+            return {
+              detectionStrategies: mitreKnowledgeGraph.getAllDetectionStrategiesDetailed(),
+            };
+          }
+
+          const stored = await storage.getAllDetectionStrategies();
+          return {
+            detectionStrategies: stored.map((strategy) => ({
+              id: strategy.strategyId,
+              name: strategy.name,
+              description: strategy.description || "",
+              techniques: [],
+              analytics: [],
+              dataComponents: [],
+            })),
+          };
+        },
+        res
+      );
+    } catch (error) {
+      console.error("Error getting MITRE detection strategies:", error);
+      res.status(500).json({ error: "Failed to get MITRE detection strategies" });
+    }
+  });
+
+  app.get("/api/mitre/techniques", async (req, res) => {
+    try {
+      const platform = typeof req.query.platform === "string" ? req.query.platform.trim() : "";
+      const platformsParam = typeof req.query.platforms === "string" ? req.query.platforms.trim() : "";
+      const platformList = platformsParam
+        ? platformsParam.split(",").map((item) => item.trim()).filter(Boolean)
+        : platform
+          ? [platform]
+          : [];
+      const normalizedPlatforms = normalizePlatformList(platformList);
+      const platformKey = normalizedPlatforms.map((item) => item.toLowerCase()).join(",") || "all";
+      const cacheKey = buildCacheKey(["mitre-techniques", platformKey]);
+
+      await respondWithCache(
+        cacheKey,
+        5 * 60 * 1000,
+        async () => {
+          let graphReady = true;
+          try {
+            await mitreKnowledgeGraph.ensureInitialized();
+          } catch (error) {
+            graphReady = false;
+            console.warn("MITRE graph unavailable for techniques.", error);
+          }
+
+          if (!graphReady) {
+            return { techniques: [] };
+          }
+
+          const allTechniques = mitreKnowledgeGraph.getAllTechniquesDetailed();
+          const filtered = normalizedPlatforms.length > 0
+            ? allTechniques.filter((technique) => platformMatchesAny(technique.platforms, normalizedPlatforms))
+            : allTechniques;
+
+          return {
+            techniques: filtered,
+            meta: {
+              total: allTechniques.length,
+              matched: filtered.length,
+            },
+          };
+        },
+        res
+      );
+    } catch (error) {
+      console.error("Error getting MITRE techniques:", error);
+      res.status(500).json({ error: "Failed to get MITRE techniques" });
+    }
+  });
+
+  app.get("/api/mitre/techniques/:techniqueId", async (req, res) => {
+    try {
+      const { techniqueId } = req.params;
+      if (!techniqueId || typeof techniqueId !== "string") {
+        return res.status(400).json({ error: "techniqueId is required" });
+      }
+
+      await mitreKnowledgeGraph.ensureInitialized();
+      const detail = mitreKnowledgeGraph.getTechniqueDetail(techniqueId);
+      if (!detail) {
+        return res.status(404).json({ error: "Technique not found" });
+      }
+      res.json({ technique: detail });
+    } catch (error) {
+      console.error("Error getting MITRE technique detail:", error);
+      res.status(500).json({ error: "Failed to get MITRE technique detail" });
+    }
+  });
+
   app.get("/api/mitre/validate-dc", async (req, res) => {
     try {
       await mitreKnowledgeGraph.ensureInitialized();
@@ -1097,6 +1292,9 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No data components available for the selected platforms." });
       }
 
+      await mitreKnowledgeGraph.ensureInitialized();
+      const channelAggregations = await getChannelsForDCs(candidates.map((candidate) => candidate.name));
+
       const result = await geminiMappingService.suggestDataComponents({
         vendor,
         product,
@@ -1109,6 +1307,33 @@ export async function registerRoutes(
           description: candidate.shortDescription || candidate.description,
           dataSourceName: candidate.dataSourceName,
           examples: candidate.examples || [],
+          mutableElements: (channelAggregations[candidate.name]?.mutableElements || []).map((element) => element.field),
+          logSourceHints: (() => {
+            const hints: Array<{ name: string; channel?: string }> = [];
+            const rawCandidateSources = Array.isArray((candidate as { logSources?: unknown }).logSources)
+              ? (candidate as { logSources?: Array<{ name?: string; channel?: string }> }).logSources || []
+              : [];
+            rawCandidateSources.forEach((source) => {
+              const name = source?.name?.trim();
+              if (!name) return;
+              const channel = source?.channel?.toString().trim();
+              hints.push({ name, channel: channel || undefined });
+            });
+            (channelAggregations[candidate.name]?.logSources || []).forEach((source) => {
+              if (!source?.name) return;
+              hints.push({
+                name: source.name,
+                channel: source.channel,
+              });
+            });
+            const seen = new Set<string>();
+            return hints.filter((hint) => {
+              const key = `${hint.name.toLowerCase()}|${(hint.channel || '').toLowerCase()}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            }).slice(0, 8);
+          })(),
         })),
       });
 
@@ -1119,6 +1344,7 @@ export async function registerRoutes(
       res.json({
         suggestedIds: result.suggestedIds,
         notes: result.notes,
+        metrics: result.metrics,
         candidateCount: candidates.length,
         evaluatedCount: result.evaluatedCount,
         decisions: result.decisions,
@@ -1137,18 +1363,22 @@ export async function registerRoutes(
 
   app.post("/api/ai/research/platforms", async (req, res) => {
     try {
-      const { vendor, product, description, platforms } = req.body || {};
+      const { vendor, product, description, platforms, aliases } = req.body || {};
       const normalizedPlatforms = Array.isArray(platforms)
         ? normalizePlatformList(platforms.map((item: string) => item.trim()).filter(Boolean))
         : [];
-      if (!vendor && !product) {
-        return res.status(400).json({ error: "vendor or product is required" });
+      const aliasList = Array.isArray(aliases)
+        ? aliases.filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
+        : [];
+      if (!vendor && !product && aliasList.length === 0) {
+        return res.status(400).json({ error: "vendor, product, or alias is required" });
       }
 
       const result = await geminiResearchService.suggestPlatforms({
         vendor,
         product,
         description,
+        aliases: aliasList,
         platforms: normalizedPlatforms,
       });
 
@@ -1160,8 +1390,16 @@ export async function registerRoutes(
 
       return res.json(result);
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       console.error("Error running platform research:", error);
-      res.status(500).json({ error: "Failed to run platform research" });
+      res.json({
+        model: "unknown",
+        suggestedPlatforms: [],
+        validation: [],
+        alternativePlatformsFound: [],
+        sources: [],
+        note: `Platform research returned no results: ${message}`,
+      });
     }
   });
 
@@ -1185,7 +1423,13 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No matching data components found for the request." });
       }
 
-      const mutableElementsByName = await getChannelsForDCs(resolved.map((dc) => dc.name));
+      const channelAggregations = await getChannelsForDCs(resolved.map((dc) => dc.name));
+      let storedComponents = await storage.getDataComponentsByComponentIds(resolved.map((dc) => dc.id));
+      if (storedComponents.length === 0) {
+        storedComponents = await storage.getAllDataComponents();
+      }
+      const storedById = new Map(storedComponents.map((component) => [component.componentId.toLowerCase(), (component.logSources || []) as any[]]));
+      const storedByName = new Map(storedComponents.map((component) => [component.name.toLowerCase(), (component.logSources || []) as any[]]));
 
       const normalizedPlatforms = Array.isArray(platforms)
         ? normalizePlatformList(platforms.map((item: string) => item.trim()).filter(Boolean))
@@ -1201,7 +1445,33 @@ export async function registerRoutes(
           id: dc.id,
           name: dc.name,
           dataSourceName: dc.dataSourceName,
-          mutableElements: (mutableElementsByName[dc.name]?.mutableElements || []).map((element) => element.field),
+          description: dc.description,
+          mutableElements: (channelAggregations[dc.name]?.mutableElements || []).map((element) => element.field),
+          logSourceHints: (() => {
+            const hints: Array<{ name: string; channel?: string }> = [];
+            const rawCandidateSources =
+              storedById.get(dc.id.toLowerCase()) || storedByName.get(dc.name.toLowerCase()) || [];
+            rawCandidateSources.forEach((source: any) => {
+              const name = typeof source?.name === 'string' ? source.name.trim() : '';
+              if (!name) return;
+              const channel = typeof source?.channel === 'string' ? source.channel.trim() : '';
+              hints.push({ name, channel: channel || undefined });
+            });
+            (channelAggregations[dc.name]?.logSources || []).forEach((source) => {
+              if (!source?.name) return;
+              hints.push({
+                name: source.name,
+                channel: source.channel,
+              });
+            });
+            const seen = new Set<string>();
+            return hints.filter((hint) => {
+              const key = `${hint.name.toLowerCase()}|${(hint.channel || '').toLowerCase()}`;
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            }).slice(0, 8);
+          })(),
         })),
       });
 
@@ -1247,13 +1517,34 @@ export async function registerRoutes(
     try {
       const mitreVersion = typeof req.query.mitreVersion === "string" ? req.query.mitreVersion : "18.1";
       const localVersion = typeof req.query.localVersion === "string" ? req.query.localVersion : "current";
+      const productId = typeof req.query.productId === "string" ? req.query.productId.trim() : "";
+      const techniquesParam = typeof req.query.techniques === "string" ? req.query.techniques : "";
+      const techniqueIds = techniquesParam
+        .split(",")
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean);
       const limit = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 200;
       const safeLimit = Number.isNaN(limit) ? 200 : limit;
-      const key = buildCacheKey(["graph-coverage-paths", mitreVersion, localVersion, safeLimit]);
+      const key = buildCacheKey([
+        "graph-coverage-paths",
+        mitreVersion,
+        localVersion,
+        safeLimit,
+        productId,
+        techniqueIds.join(","),
+      ]);
       await respondWithCache(
         key,
         30 * 1000,
-        async () => ({ paths: await getCoveragePaths(mitreVersion, localVersion, safeLimit) }),
+        async () => ({
+          paths: await getCoveragePaths(
+            mitreVersion,
+            localVersion,
+            safeLimit,
+            productId || undefined,
+            techniqueIds.length > 0 ? techniqueIds : undefined
+          ),
+        }),
         res
       );
     } catch (error) {
@@ -1645,6 +1936,11 @@ export async function registerRoutes(
           "gemini_top_k",
           "gemini_seed",
           "gemini_max_output_tokens",
+          "gemini_dc_pipeline_mode",
+          "gemini_dc_require_legacy_parity",
+          "gemini_dc_cache_enabled",
+          "gemini_dc_cache_ttl",
+          "gemini_dc_policy_version",
         ]));
 
       const recordMap = new Map(records.map((record) => [record.key, record]));
@@ -1679,8 +1975,15 @@ export async function registerRoutes(
         seed: resolveValue("gemini_seed", "GEMINI_SEED"),
         maxOutputTokens: resolveValue("gemini_max_output_tokens", "GEMINI_MAX_OUTPUT_TOKENS"),
       };
+      const mappingPipeline = {
+        mode: resolveValue("gemini_dc_pipeline_mode", "GEMINI_DC_PIPELINE_MODE", "legacy"),
+        requireLegacyParity: resolveValue("gemini_dc_require_legacy_parity", "GEMINI_DC_REQUIRE_LEGACY_PARITY", "true"),
+        cacheEnabled: resolveValue("gemini_dc_cache_enabled", "GEMINI_DC_CACHE_ENABLED", "true"),
+        cacheTtl: resolveValue("gemini_dc_cache_ttl", "GEMINI_DC_CACHE_TTL", "43200s"),
+        policyVersion: resolveValue("gemini_dc_policy_version", "GEMINI_DC_POLICY_VERSION", "v1"),
+      };
 
-      res.json({ configured, source, updatedAt, model, modelSource, generation });
+      res.json({ configured, source, updatedAt, model, modelSource, generation, mappingPipeline });
     } catch (error) {
       console.error("Error fetching Gemini key status:", error);
       res.status(500).json({ error: "Failed to fetch Gemini key status" });
@@ -1706,9 +2009,28 @@ export async function registerRoutes(
       const topK = parseNumber(req.body?.topK, "topK");
       const seed = parseNumber(req.body?.seed, "seed");
       const maxOutputTokens = parseNumber(req.body?.maxOutputTokens, "maxOutputTokens");
+      const pipelineMode = typeof req.body?.pipelineMode === "string" ? req.body.pipelineMode.trim().toLowerCase() : "";
+      const pipelineModeNormalized = ["legacy", "shadow", "optimized"].includes(pipelineMode) ? pipelineMode : "";
+      const parseBoolean = (value: unknown) => {
+        if (value === undefined || value === null) return undefined;
+        if (typeof value === "boolean") return value ? "true" : "false";
+        const normalized = String(value).trim().toLowerCase();
+        if (["true", "1", "yes", "y", "on"].includes(normalized)) return "true";
+        if (["false", "0", "no", "n", "off"].includes(normalized)) return "false";
+        throw new Error("Invalid boolean setting");
+      };
+      const requireLegacyParity = parseBoolean(req.body?.requireLegacyParity);
+      const cacheEnabled = parseBoolean(req.body?.cacheEnabled);
+      const cacheTtl = typeof req.body?.cacheTtl === "string" && req.body.cacheTtl.trim().length > 0
+        ? req.body.cacheTtl.trim()
+        : undefined;
+      const policyVersion = typeof req.body?.policyVersion === "string" && req.body.policyVersion.trim().length > 0
+        ? req.body.policyVersion.trim()
+        : undefined;
 
-      if (!apiKey && !model && !temperature && !topP && !topK && !seed && !maxOutputTokens) {
-        return res.status(400).json({ error: "Provide apiKey, model, or generation settings to update." });
+      if (!apiKey && !model && !temperature && !topP && !topK && !seed && !maxOutputTokens
+        && !pipelineModeNormalized && !requireLegacyParity && !cacheEnabled && !cacheTtl && !policyVersion) {
+        return res.status(400).json({ error: "Provide apiKey, model, generation settings, or mapping pipeline settings to update." });
       }
       if (apiKey) {
         await settingsService.set("gemini_api_key", apiKey);
@@ -1730,6 +2052,21 @@ export async function registerRoutes(
       }
       if (maxOutputTokens !== undefined) {
         await settingsService.set("gemini_max_output_tokens", maxOutputTokens);
+      }
+      if (pipelineModeNormalized) {
+        await settingsService.set("gemini_dc_pipeline_mode", pipelineModeNormalized);
+      }
+      if (requireLegacyParity !== undefined) {
+        await settingsService.set("gemini_dc_require_legacy_parity", requireLegacyParity);
+      }
+      if (cacheEnabled !== undefined) {
+        await settingsService.set("gemini_dc_cache_enabled", cacheEnabled);
+      }
+      if (cacheTtl !== undefined) {
+        await settingsService.set("gemini_dc_cache_ttl", cacheTtl);
+      }
+      if (policyVersion !== undefined) {
+        await settingsService.set("gemini_dc_policy_version", policyVersion);
       }
       res.json({ status: "ok" });
     } catch (error) {
@@ -1824,6 +2161,16 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Error running db:push:", error);
       res.status(500).json({ error: "Failed to run db:push" });
+    }
+  });
+
+  app.post("/api/admin/maintenance/db-seed", async (req, res) => {
+    try {
+      const result = await adminService.runDbSeed();
+      res.json(result);
+    } catch (error) {
+      console.error("Error running db:seed:", error);
+      res.status(500).json({ error: "Failed to run db:seed" });
     }
   });
 

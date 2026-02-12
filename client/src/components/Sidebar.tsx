@@ -1,6 +1,5 @@
 import { Link, useLocation } from 'wouter';
 import {
-  Shield,
   LayoutDashboard,
   Cpu,
   Settings,
@@ -18,12 +17,48 @@ import {
   Home,
   Layers,
   FileText,
-  BookOpen
+  BookOpen,
+  Target,
+  GitBranch,
 } from 'lucide-react';
 import { useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Input } from '@/components/ui/input';
 import { useTheme } from '@/lib/theme';
+
+function AntikytheraIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className}>
+      {/* Main gear teeth */}
+      <g stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+        <circle cx="11" cy="11" r="7.5" />
+        {/* Teeth */}
+        <line x1="11" y1="1" x2="11" y2="3" />
+        <line x1="11" y1="19" x2="11" y2="21" />
+        <line x1="1" y1="11" x2="3" y2="11" />
+        <line x1="19" y1="11" x2="21" y2="11" />
+        <line x1="3.93" y1="3.93" x2="5.34" y2="5.34" />
+        <line x1="16.66" y1="16.66" x2="18.07" y2="18.07" />
+        <line x1="3.93" y1="18.07" x2="5.34" y2="16.66" />
+        <line x1="16.66" y1="5.34" x2="18.07" y2="3.93" />
+      </g>
+      {/* Inner ring */}
+      <circle cx="11" cy="11" r="4.5" stroke="currentColor" strokeWidth="1" opacity="0.5" />
+      {/* Dial hands */}
+      <line x1="11" y1="11" x2="11" y2="5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" transform="rotate(-30 11 11)" />
+      <line x1="11" y1="11" x2="11" y2="7" stroke="currentColor" strokeWidth="1" strokeLinecap="round" opacity="0.6" transform="rotate(80 11 11)" />
+      {/* Center dot */}
+      <circle cx="11" cy="11" r="1.5" fill="currentColor" />
+      {/* Small secondary gear */}
+      <circle cx="19" cy="19" r="3" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="19" cy="19" r="1" fill="currentColor" />
+      <line x1="19" y1="15.5" x2="19" y2="16.5" stroke="currentColor" strokeWidth="1" />
+      <line x1="19" y1="21.5" x2="19" y2="22.5" stroke="currentColor" strokeWidth="1" />
+      <line x1="15.5" y1="19" x2="16.5" y2="19" stroke="currentColor" strokeWidth="1" />
+      <line x1="21.5" y1="19" x2="22.5" y2="19" stroke="currentColor" strokeWidth="1" />
+    </svg>
+  );
+}
 
 type SidebarVariant = 'default' | 'dashboard';
 
@@ -31,6 +66,8 @@ const navItems = [
   { href: '/', label: 'Coverage Map', icon: LayoutDashboard },
   { href: '/ai-mapper', label: 'Auto Mapper', icon: Cpu },
   { href: '/products', label: 'Security Stack', icon: Database },
+  { href: '/path-builder', label: 'Path Builder', icon: GitBranch },
+  { href: '/techniques', label: 'Techniques', icon: Target },
   { href: '/detections', label: 'Detections', icon: Boxes },
   { href: '/threats', label: 'Threat Groups', icon: Activity },
 ];
@@ -42,7 +79,9 @@ const docItems = [
 const dashboardNavItems = [
   { icon: LayoutDashboard, label: 'Home', href: '/' },
   { icon: Home, label: 'Products', href: '/products' },
+  { icon: GitBranch, label: 'Path Builder', href: '/path-builder' },
   { icon: Layers, label: 'Data Components', href: '/data-components' },
+  { icon: Target, label: 'Techniques', href: '/techniques' },
   { icon: FileText, label: 'Detection Strategies', href: '/detection-strategies' },
   { icon: Boxes, label: 'Detections', href: '/detections' },
   { icon: BookOpen, label: 'Documentation', href: '/documentation' },
@@ -70,11 +109,11 @@ export function Sidebar({ variant = 'default' }: { variant?: SidebarVariant }) {
       <div className="p-4 border-b border-sidebar-border">
         <Link href="/" className="flex items-center gap-3" data-testid="link-logo">
           <div className="w-10 h-10 rounded-lg bg-primary/20 flex items-center justify-center glow-primary">
-            <Shield className="w-6 h-6 text-primary" />
+            <AntikytheraIcon className="w-6 h-6 text-primary" />
           </div>
           {!collapsed && (
             <div>
-              <h1 className="text-lg font-bold text-foreground tracking-tight">OpenTidal</h1>
+              <h1 className="text-lg font-bold text-foreground tracking-tight">Antikythera</h1>
               <p className="text-xs text-muted-foreground font-mono">v1.0.0</p>
             </div>
           )}
@@ -171,13 +210,13 @@ function DashboardSidebar() {
   const { theme, toggleTheme } = useTheme();
 
   return (
-    <aside className="w-60 border-r border-border bg-sidebar flex-shrink-0 flex flex-col">
+    <aside className="w-60 h-full border-r border-border bg-sidebar flex-shrink-0 flex flex-col">
       <div className="p-4 border-b border-border">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-            <Shield className="w-5 h-5 text-primary-foreground" />
+            <AntikytheraIcon className="w-5 h-5 text-primary-foreground" />
           </div>
-          <span className="font-semibold text-foreground">OpenTidal</span>
+          <span className="font-semibold text-foreground">Antikythera</span>
         </div>
       </div>
 
@@ -195,7 +234,7 @@ function DashboardSidebar() {
       <nav className="flex-1 px-3">
         <div className="space-y-1">
           {dashboardNavItems.map((item) => {
-            const isActive = item.href ? location === item.href : item.active;
+            const isActive = item.href ? location === item.href : (item as any).active;
             const navClassName = `w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-md transition-colors ${
               isActive
                 ? 'bg-primary/10 text-primary font-medium'

@@ -265,10 +265,24 @@ export default function AdminTasks() {
   };
 
   const runDbSeed = async () => {
-    setDbSeed({ status: 'running', message: 'This action requires CLI access. Run: npm run db:seed', progress: 0 });
+    setDbSeed({ status: 'running', message: 'Seeding database...', progress: 30 });
 
-    // Show info message since seeding requires CLI
-    setTimeout(() => setDbSeed({ status: 'idle', message: '', progress: 0 }), 5000);
+    try {
+      const response = await fetch('/api/admin/maintenance/db-seed', { method: 'POST' });
+      if (!response.ok) {
+        throw new Error('Failed to run db:seed');
+      }
+      const result = await response.json();
+      setDbSeed({
+        status: 'success',
+        message: result.message || 'Database seed completed successfully.',
+        progress: 100
+      });
+      setTimeout(() => setDbSeed({ status: 'idle', message: '', progress: 0 }), 3000);
+      refetchStatus();
+    } catch (error: any) {
+      setDbSeed({ status: 'error', message: error.message || 'Failed to run db:seed', progress: 0 });
+    }
   };
 
   const runDbPush = async () => {
@@ -527,7 +541,7 @@ export default function AdminTasks() {
                   <Server className="w-5 h-5 text-primary" />
                   System Status
                 </CardTitle>
-                <CardDescription>Current state of OpenTidal components</CardDescription>
+                <CardDescription>Current state of Antikythera components</CardDescription>
               </CardHeader>
               <CardContent>
                 {statusLoading ? (

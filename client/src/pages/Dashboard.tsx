@@ -13,7 +13,8 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Asset, ctidProducts, dataComponents } from '@/lib/mitreData';
+import { dataComponents } from '@/lib/mitreData';
+import { Asset, ctidProducts } from '@/lib/products';
 import { ProductView } from '@/components/ProductView';
 import { useSearchProducts, useAliases, useAddAlias, useDeleteAlias, useDeleteProduct, useProducts, type Product } from '@/hooks/useProducts';
 import { Sidebar } from '@/components/Sidebar';
@@ -252,7 +253,7 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen flex bg-background">
+    <div className="flex h-screen overflow-hidden bg-background">
       <Sidebar variant="dashboard" />
 
       <main className="flex-1 overflow-auto">
@@ -483,11 +484,13 @@ export default function Dashboard() {
                 {filteredProducts.map((product) => {
                   const mapping = getProductMapping(product.id);
                   const isSelected = selectedCustomProducts.has(product.id);
+                  const isVendorProduct = product.source !== 'custom';
                   return (
                     <Card 
                       key={product.id}
                       className={cn(
-                        "bg-background border-border hover:border-primary/50 transition-all cursor-pointer group",
+                        "shadow-sm hover:shadow-lg ring-1 ring-black/5 dark:ring-white/10 transition-all cursor-pointer group",
+                        isVendorProduct ? "bg-gradient-to-br from-primary/15 to-primary/5" : "bg-muted/30",
                         isSelected && "ring-2 ring-primary/30"
                       )}
                       onClick={() => handleSelectProduct(product)}

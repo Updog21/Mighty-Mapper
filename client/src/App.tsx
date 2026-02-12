@@ -14,6 +14,9 @@ import DataComponents from "@/pages/DataComponents";
 import DetectionStrategies from "@/pages/DetectionStrategies";
 import Documentation from "@/pages/Documentation";
 import Detections from "@/pages/Detections";
+import Techniques from "@/pages/Techniques";
+import TechniqueDetail from "@/pages/TechniqueDetail";
+import PathBuilder from "@/pages/PathBuilder";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -25,6 +28,9 @@ function Router() {
       <Route path="/data-components" component={DataComponents} />
       <Route path="/detection-strategies" component={DetectionStrategies} />
       <Route path="/detections" component={Detections} />
+      <Route path="/path-builder" component={PathBuilder} />
+      <Route path="/techniques/:techniqueId" component={TechniqueDetail} />
+      <Route path="/techniques" component={Techniques} />
       <Route path="/documentation" component={Documentation} />
       <Route path="/threats" component={Threats} />
       <Route path="/settings" component={Settings} />

@@ -53,7 +53,7 @@ function getPlatformIcon(platform: string) {
 
 function AnalyticCard({ analytic, index }: { analytic: AnalyticItem; index: number }) {
   const [expanded, setExpanded] = useState(false);
-  const dcRefs = analytic.dataComponents.map(id => dataComponents[id]).filter(Boolean);
+  const dcRefs = analytic.dataComponents.map(id => (dataComponents as any)[id]).filter(Boolean) as DataComponentRef[];
 
   return (
     <div className="border border-border rounded-lg overflow-hidden bg-card/30">
@@ -76,7 +76,7 @@ function AnalyticCard({ analytic, index }: { analytic: AnalyticItem; index: numb
             <h4 className="font-semibold text-foreground">{analytic.name}</h4>
             <p className="text-sm text-muted-foreground mt-1 line-clamp-2">{analytic.description}</p>
             <div className="flex items-center gap-2 mt-2">
-              {analytic.platforms.map(p => (
+              {(analytic.platforms || []).map((p: string) => (
                 <Badge key={p} variant="secondary" className="text-xs flex items-center gap-1">
                   {getPlatformIcon(p)}
                   {p}
@@ -108,7 +108,7 @@ function AnalyticCard({ analytic, index }: { analytic: AnalyticItem; index: numb
             </h5>
             <div className="space-y-3">
               {dcRefs.map(dc => (
-                <DataComponentCard key={dc.id} dc={dc} platforms={analytic.platforms} />
+                <DataComponentCard key={dc.id} dc={dc} platforms={analytic.platforms || []} />
               ))}
             </div>
           </div>
@@ -119,7 +119,7 @@ function AnalyticCard({ analytic, index }: { analytic: AnalyticItem; index: numb
 }
 
 function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms: string[] }) {
-  const relevantPlatforms = dc.platforms.filter(p => platformMatchesAny([p.platform], platforms));
+  const relevantPlatforms = (dc.platforms || []).filter((p: any) => platformMatchesAny([p.platform], platforms));
   const [activePlatform, setActivePlatform] = useState<string>(relevantPlatforms[0]?.platform || 'Windows');
 
   return (
@@ -128,7 +128,9 @@ function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms:
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 mb-1">
-              <span className="font-mono text-xs text-blue-400">{dc.id}</span>
+              <Badge variant="secondary" className="text-[10px] font-mono">
+                {dc.id}
+              </Badge>
               <a 
                 href={`https://attack.mitre.org/datacomponents/${dc.id}/`}
                 target="_blank"
@@ -150,9 +152,9 @@ function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms:
       <Tabs value={activePlatform} onValueChange={setActivePlatform} className="w-full">
         <div className="px-4 pt-3 border-b border-blue-500/20 bg-muted/30">
           <TabsList className="h-9 bg-transparent p-0 gap-1">
-            {relevantPlatforms.map(pm => (
-              <TabsTrigger 
-                key={pm.platform} 
+            {relevantPlatforms.map((pm: any) => (
+              <TabsTrigger
+                key={pm.platform}
                 value={pm.platform}
                 className="text-xs px-3 h-8 data-[state=active]:bg-blue-500/20 data-[state=active]:text-blue-400"
               >
@@ -163,7 +165,7 @@ function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms:
           </TabsList>
         </div>
 
-        {relevantPlatforms.map(pm => (
+        {relevantPlatforms.map((pm: any) => (
           <TabsContent key={pm.platform} value={pm.platform} className="m-0">
             <div className="p-4 space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -199,7 +201,7 @@ function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms:
           Mutable Elements (Required Fields)
         </h6>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {dc.mutableElements.map(me => (
+          {(dc.mutableElements || []).map((me: any) => (
             <div key={me.name} className="p-2 rounded bg-background border border-border">
               <div className="flex items-center gap-2">
                 <code className="text-xs font-mono text-primary">{me.name}</code>
@@ -217,7 +219,7 @@ function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms:
 }
 
 export function DetectionStrategyView({ strategy, onBack }: DetectionStrategyViewProps) {
-  const dcRefs = strategy.dataComponentRefs.map(id => dataComponents[id]).filter(Boolean);
+  const dcRefs = strategy.dataComponentRefs.map(id => (dataComponents as any)[id]).filter(Boolean) as DataComponentRef[];
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">

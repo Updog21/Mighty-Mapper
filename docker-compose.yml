@@ -1,14 +1,14 @@
 services:
   app:
     build: .
-    container_name: opentidal
+    container_name: antikythera
     restart: unless-stopped
     ports:
       - "5000:5000"
     environment:
       - NODE_ENV=production
       - PORT=5000
-      - DATABASE_URL=postgresql://opentidal:${POSTGRES_PASSWORD}@db:5432/opentidal
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-antikythera}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-antikythera}
       - SESSION_SECRET=${SESSION_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     depends_on:
@@ -17,16 +17,16 @@ services:
 
   db:
     image: postgres:15-alpine
-    container_name: opentidal-db
+    container_name: antikythera-db
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=opentidal
+      - POSTGRES_USER=${POSTGRES_USER:-antikythera}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=opentidal
+      - POSTGRES_DB=${POSTGRES_DB:-antikythera}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U opentidal -d opentidal"]
+      test: ["CMD-SHELL", "pg_isready -U antikythera -d antikythera"]
       interval: 5s
       timeout: 5s
       retries: 5

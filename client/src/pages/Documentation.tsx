@@ -13,7 +13,7 @@ export default function Documentation() {
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Documentation</h1>
               <p className="text-muted-foreground text-sm mt-1">
-                Learn how OpenTidal works and how to use each feature.
+                Learn how Antikythera works and how to use each feature.
               </p>
             </header>
 

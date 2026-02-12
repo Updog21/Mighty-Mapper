@@ -133,7 +133,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
         if (!isTrustedSource) {
           return [{
             ...analytic,
-            streamStatus: 'heuristic',
+            streamStatus: 'heuristic' as const,
             metadata: {
               ...(analytic.metadata || {}),
               stream_status: 'heuristic',
@@ -184,7 +184,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
             ...analytic,
             rawSource,
             techniqueIds: finalTechniqueIds,
-            streamStatus: 'verified',
+            streamStatus: 'verified' as const,
             metadata: inferredMetadata,
           }];
         }
@@ -197,7 +197,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
       return [{
         ...analytic,
         rawSource,
-        streamStatus: isTrustedSource ? undefined : 'heuristic',
+        streamStatus: (isTrustedSource ? undefined : 'heuristic') as 'heuristic' | undefined,
         metadata: {
           ...(analytic.metadata || {}),
           raw_source: rawSource,

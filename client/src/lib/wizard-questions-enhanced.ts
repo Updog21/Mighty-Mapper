@@ -197,7 +197,7 @@ export function processAnswer(
     answer: true,
     derivedRequirements: {
       dcNames: question.dcNames,
-      channels: [...new Set(question.analyticRequirements.map(r => r.channel))],
+      channels: Array.from(new Set(question.analyticRequirements.map(r => r.channel))),
       expectedFields: question.combinedExpectedFields,
       mutableElements: question.combinedMutableElements,
       logSources: question.combinedLogSources,

@@ -2,12 +2,25 @@ import { Sidebar } from '@/components/Sidebar';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { StixExportControls } from '@/components/StixExportControls';
 import { useDataComponents } from '@/hooks/useMitreData';
 import { useSystemStatus } from '@/hooks/useProducts';
-import { Database, Layers, Loader2, AlertCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { toMarkdownTable } from '@/lib/stix-export';
+import { PLATFORM_VALUES, normalizePlatformList } from '@shared/platforms';
+import { Database, Layers, Loader2, AlertCircle, ExternalLink, ChevronDown, ChevronRight } from 'lucide-react';
+import { useMemo, useState } from 'react';
 
 export default function DataComponents() {
-  const { data: components, isLoading, error } = useDataComponents();
+  const [selectedPlatform, setSelectedPlatform] = useState<string>('All Platforms');
+  const [expandedComponents, setExpandedComponents] = useState<Set<string>>(new Set());
+  const normalizedSelection = useMemo(() => (
+    selectedPlatform === 'All Platforms'
+      ? []
+      : normalizePlatformList([selectedPlatform])
+  ), [selectedPlatform]);
+  const { data: components, isLoading, error } = useDataComponents(normalizedSelection);
   const { data: systemStatus } = useSystemStatus();
 
   const lastSync = systemStatus?.lastMitreSync
@@ -17,6 +30,88 @@ export default function DataComponents() {
   const uniqueSources = new Set(
     (components || []).map(component => component.dataSourceName).filter(Boolean)
   ).size;
+  const platformOptions = useMemo(
+    () => ['All Platforms', ...PLATFORM_VALUES],
+    []
+  );
+  const toAttackDataComponentId = (value: string): string => {
+    if (!value) return '';
+    const match = value.match(/DC\d{4}/i);
+    return match ? match[0].toUpperCase() : '';
+  };
+  const setExpanded = (componentKey: string, open: boolean) => {
+    setExpandedComponents((prev) => {
+      const next = new Set(prev);
+      if (open) next.add(componentKey);
+      else next.delete(componentKey);
+      return next;
+    });
+  };
+  const componentRows = components || [];
+  const exportPayload = useMemo(
+    () => ({
+      page: 'data-components',
+      selectedPlatform,
+      totalComponents: componentRows.length,
+      dataComponents: componentRows,
+    }),
+    [componentRows, selectedPlatform]
+  );
+  const exportMarkdown = useMemo(() => {
+    const lines: string[] = [
+      '# Data Components',
+      '',
+      `- Platform Filter: ${selectedPlatform}`,
+      `- Total Components: ${componentRows.length}`,
+      '',
+    ];
+
+    componentRows.forEach((component) => {
+      const attackId = toAttackDataComponentId(component.id) || component.id;
+      lines.push(`## ${component.name} (${attackId})`, '');
+      lines.push(component.description || 'No description provided.', '');
+
+      if (Array.isArray(component.examples) && component.examples.length > 0) {
+        lines.push('### Examples', '');
+        component.examples.forEach((example) => lines.push(`- ${example}`));
+        lines.push('');
+      }
+
+      lines.push('### Log Sources', '');
+      if (Array.isArray(component.logSources) && component.logSources.length > 0) {
+        lines.push(
+          toMarkdownTable(
+            ['Name', 'Channel'],
+            component.logSources.map((source) => [source.name, source.channel || '-'])
+          )
+        );
+      } else {
+        lines.push('No log sources listed.');
+      }
+      lines.push('');
+
+      lines.push('### Detection Strategies', '');
+      if (Array.isArray(component.detectionStrategies) && component.detectionStrategies.length > 0) {
+        lines.push(
+          toMarkdownTable(
+            ['ID', 'Name', 'Technique Detected'],
+            component.detectionStrategies.map((strategy) => [
+              strategy.id,
+              strategy.name,
+              Array.isArray(strategy.techniques) && strategy.techniques.length > 0
+                ? strategy.techniques.map((technique) => `${technique.id} (${technique.name})`).join(', ')
+                : '-',
+            ])
+          )
+        );
+      } else {
+        lines.push('No detection strategies mapped.');
+      }
+      lines.push('');
+    });
+
+    return lines.join('\n');
+  }, [componentRows, selectedPlatform]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -30,7 +125,41 @@ export default function DataComponents() {
               <p className="text-muted-foreground text-sm mt-1">
                 Flattened MITRE ATT&CK data components with source context for quick mapping.
               </p>
+              <div className="mt-3">
+                <StixExportControls
+                  baseName={`data-components-${selectedPlatform}`}
+                  jsonPayload={exportPayload}
+                  markdownContent={exportMarkdown}
+                  disabled={isLoading || Boolean(error)}
+                />
+              </div>
             </header>
+
+            <Card className="bg-card/50 backdrop-blur border-border">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Platform filter</CardTitle>
+                <CardDescription>Filter data components by MITRE platform scope.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="flex flex-wrap gap-2">
+                  {platformOptions.map((platform) => {
+                    const isSelected = platform === selectedPlatform;
+                    return (
+                      <Button
+                        key={platform}
+                        type="button"
+                        size="sm"
+                        variant={isSelected ? 'default' : 'outline'}
+                        className="rounded-full"
+                        onClick={() => setSelectedPlatform(platform)}
+                      >
+                        {platform}
+                      </Button>
+                    );
+                  })}
+                </div>
+              </CardContent>
+            </Card>
 
             {isStale && (
               <Alert className="border-yellow-500/30 bg-yellow-500/10">
@@ -84,40 +213,188 @@ export default function DataComponents() {
                 ) : (components || []).length === 0 ? (
                   <div className="text-center py-12">
                     <Layers className="w-16 h-16 text-muted-foreground mx-auto mb-4 opacity-30" />
-                    <h3 className="text-lg font-semibold text-foreground mb-2">No data components yet</h3>
+                    <h3 className="text-lg font-semibold text-foreground mb-2">
+                      {selectedPlatform === 'All Platforms'
+                        ? 'No data components yet'
+                        : `No data components mapped for ${selectedPlatform}`}
+                    </h3>
                     <p className="text-sm text-muted-foreground">
-                      Run MITRE Data Sync in Admin Tasks to populate the catalog.
+                      {selectedPlatform === 'All Platforms'
+                        ? 'Run MITRE Data Sync in Admin Tasks to populate the catalog.'
+                        : 'Ensure the platform map has been rebuilt (restart the server or run Database Seed).'}
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-3">
                     {components?.map(component => (
-                      <Card
-                        key={component.componentId}
-                        className="bg-background border-border hover:border-primary/50 transition-colors"
-                      >
-                        <CardContent className="p-4">
-                          <div className="flex items-start justify-between gap-4">
-                            <div className="flex-1">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="text-sm text-muted-foreground">
-                                  {component.dataSourceName || 'Uncategorized'}
-                                </span>
-                                <Badge variant="secondary" className="text-xs">
-                                  {component.componentId}
-                                </Badge>
-                              </div>
-                              <h3 className="font-semibold text-foreground">{component.name}</h3>
-                              <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                                {component.description || 'No description provided.'}
-                              </p>
-                            </div>
-                            <div className="text-xs text-muted-foreground whitespace-nowrap">
-                              {component.dataSourceId || '—'}
-                            </div>
-                          </div>
-                        </CardContent>
-                      </Card>
+                      (() => {
+                        const componentKey = `${component.id}-${component.name}`;
+                        const attackId = toAttackDataComponentId(component.id);
+                        const isExpanded = expandedComponents.has(componentKey);
+                        return (
+                          <Card
+                            key={componentKey}
+                            className="bg-background border-border hover:border-primary/50 transition-colors overflow-hidden"
+                          >
+                            <Collapsible open={isExpanded} onOpenChange={(open) => setExpanded(componentKey, open)}>
+                              <CollapsibleTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="w-full p-4 flex items-center justify-between text-left hover:bg-muted/20 transition-colors"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <h3 className="text-base font-normal text-foreground leading-tight">
+                                        {component.name}
+                                      </h3>
+                                      <Badge variant="secondary" className="text-xs font-mono">
+                                        {attackId || 'Unknown ID'}
+                                      </Badge>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2 ml-3">
+                                    {isExpanded ? (
+                                      <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />
+                                    ) : (
+                                      <ChevronRight className="w-4 h-4 text-muted-foreground shrink-0" />
+                                    )}
+                                  </div>
+                                </button>
+                              </CollapsibleTrigger>
+                              <CollapsibleContent>
+                                <CardContent className="px-5 pb-5 pt-0 space-y-4 border-t border-border/60">
+                                  {attackId ? (
+                                    <div className="pt-4">
+                                      <a
+                                        href={`https://attack.mitre.org/datacomponents/${attackId}/`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 text-primary hover:underline underline-offset-2 break-all text-sm"
+                                      >
+                                        {`https://attack.mitre.org/datacomponents/${attackId}/`}
+                                        <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                                      </a>
+                                    </div>
+                                  ) : null}
+
+                                  <div className="space-y-1">
+                                    <h4 className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">
+                                      Description
+                                    </h4>
+                                    <p className="text-sm text-foreground leading-relaxed">
+                                      {component.description || 'No description provided.'}
+                                    </p>
+                                  </div>
+
+                                  {Array.isArray(component.examples) && component.examples.length > 0 ? (
+                                    <div className="space-y-2">
+                                      <h4 className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">
+                                        Examples
+                                      </h4>
+                                      <div className="rounded-md border border-border bg-muted/20 p-3">
+                                        <ol className="list-decimal pl-5 space-y-2 text-sm text-foreground">
+                                          {component.examples.map((example, idx) => (
+                                            <li key={`${component.id}-example-${idx}`} className="leading-relaxed">
+                                              {example}
+                                            </li>
+                                          ))}
+                                        </ol>
+                                      </div>
+                                    </div>
+                                  ) : null}
+
+                                  <div className="space-y-1">
+                                    <h4 className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">
+                                      Log Sources
+                                    </h4>
+                                    {Array.isArray(component.logSources) && component.logSources.length > 0 ? (
+                                      <div className="overflow-x-auto rounded-md border border-border">
+                                        <table className="w-full text-sm border-collapse">
+                                          <thead className="bg-muted/40">
+                                            <tr>
+                                              <th className="text-left px-3 py-2 font-medium text-foreground border border-border">Name</th>
+                                              <th className="text-left px-3 py-2 font-medium text-foreground border border-border">Channel</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {component.logSources.map((source, idx) => (
+                                              <tr key={`${component.id}-logsource-${idx}`} className="align-top">
+                                                <td className="px-3 py-2 text-foreground font-normal border border-border">{source.name}</td>
+                                                <td className="px-3 py-2 text-muted-foreground border border-border">{source.channel || '—'}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : (
+                                      <p className="text-sm text-muted-foreground">No log sources listed.</p>
+                                    )}
+                                  </div>
+
+                                  <div className="space-y-1">
+                                    <h4 className="text-xs uppercase tracking-wide text-muted-foreground font-semibold">
+                                      Detection Strategies
+                                    </h4>
+                                    {Array.isArray(component.detectionStrategies) && component.detectionStrategies.length > 0 ? (
+                                      <div className="overflow-x-auto rounded-md border border-border">
+                                        <table className="w-full text-sm border-collapse">
+                                          <thead className="bg-muted/40">
+                                            <tr>
+                                              <th className="text-left px-3 py-2 font-medium text-foreground border border-border">ID</th>
+                                              <th className="text-left px-3 py-2 font-medium text-foreground border border-border">Name</th>
+                                              <th className="text-left px-3 py-2 font-medium text-foreground border border-border">Technique Detected</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {component.detectionStrategies.map((strategy) => (
+                                              <tr key={`${component.id}-strategy-${strategy.id}`} className="align-top">
+                                                <td className="px-3 py-2 text-foreground font-mono text-xs border border-border">
+                                                  <a
+                                                    href={`/detection-strategies?strategy=${encodeURIComponent(strategy.id)}`}
+                                                    className="text-primary hover:underline underline-offset-2"
+                                                  >
+                                                    {strategy.id}
+                                                  </a>
+                                                </td>
+                                                <td className="px-3 py-2 text-foreground font-normal border border-border">
+                                                  <a
+                                                    href={`/detection-strategies?strategy=${encodeURIComponent(strategy.id)}`}
+                                                    className="text-foreground font-normal hover:underline underline-offset-2"
+                                                  >
+                                                    {strategy.name}
+                                                  </a>
+                                                </td>
+                                                <td className="px-3 py-2 text-muted-foreground border border-border">
+                                                  {Array.isArray(strategy.techniques) && strategy.techniques.length > 0
+                                                    ? strategy.techniques.map((technique, index) => (
+                                                      <span key={`${strategy.id}-${technique.id}`}>
+                                                        {index > 0 ? ', ' : ''}
+                                                        <a
+                                                          href={`/detections?technique=${encodeURIComponent(technique.id)}`}
+                                                          className="text-foreground hover:text-primary hover:underline underline-offset-2"
+                                                        >
+                                                          <span className="font-mono text-red-600">{technique.id}</span>
+                                                          <span className="text-muted-foreground">{` (${technique.name})`}</span>
+                                                        </a>
+                                                      </span>
+                                                    ))
+                                                    : '—'}
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : (
+                                      <p className="text-sm text-muted-foreground">No detection strategies mapped.</p>
+                                    )}
+                                  </div>
+                                </CardContent>
+                              </CollapsibleContent>
+                            </Collapsible>
+                          </Card>
+                        );
+                      })()
                     ))}
                   </div>
                 )}

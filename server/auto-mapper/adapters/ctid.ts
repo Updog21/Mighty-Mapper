@@ -229,7 +229,7 @@ export class CTIDAdapter implements ResourceAdapter {
       }
 
       // Track all unique data components
-      for (const dcName of enrichedDataComponents) {
+      for (const dcName of Array.from(enrichedDataComponents)) {
         const id = `DC-${dcName.replace(/\s+/g, '-')}`;
         if (!dataComponentsMap.has(id)) {
           dataComponentsMap.set(id, {

@@ -7,7 +7,7 @@ const LOCAL_DATASET = "local";
 const LOCAL_VERSION = "current";
 const MITRE_DATASET = "mitre_attack";
 
-type DbExecutor = typeof db;
+type DbExecutor = Pick<typeof db, 'insert' | 'delete' | 'select' | 'update'>;
 
 export async function upsertProductNode(product: Product, executor: DbExecutor = db): Promise<string> {
   const stixId = generateLocalStixId("product", String(product.id));

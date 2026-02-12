@@ -7,6 +7,15 @@ export interface CoveragePathRow {
   techniqueName: string;
   originProductId: string;
   path: string[];
+  pathNodes: CoveragePathNode[];
+}
+
+export interface CoveragePathNode {
+  id: string;
+  type: string;
+  name: string;
+  externalId?: string;
+  label: string;
 }
 
 export interface GapRow {
@@ -18,8 +27,23 @@ export interface GapRow {
 export async function getCoveragePaths(
   mitreDatasetVersion = "18.1",
   localDatasetVersion = "current",
-  limit = 200
+  limit = 200,
+  productId?: string,
+  techniqueIds?: string[]
 ): Promise<CoveragePathRow[]> {
+  const normalizedProductId = typeof productId === "string" ? productId.trim() : "";
+  const hasProductFilter = normalizedProductId.length > 0;
+  const normalizedTechniqueIds = Array.isArray(techniqueIds)
+    ? Array.from(
+      new Set(
+        techniqueIds
+          .map((value) => value.trim().toUpperCase())
+          .filter((value) => value.length > 0)
+      )
+    )
+    : [];
+  const hasTechniqueFilter = normalizedTechniqueIds.length > 0;
+
   const result = await db.execute(sql`
     WITH RECURSIVE traversal AS (
       SELECT
@@ -35,6 +59,9 @@ export async function getCoveragePaths(
         AND pn.type = 'x-mitre-mapper-product'
         AND pn.dataset = 'local'
         AND pn.dataset_version = ${localDatasetVersion}
+        AND ${hasProductFilter
+          ? sql`pn.attributes->>'productId' = ${normalizedProductId}`
+          : sql`true`}
 
       UNION ALL
 
@@ -67,21 +94,87 @@ export async function getCoveragePaths(
       COALESCE(n.attributes->>'externalId', n.id) AS technique_id,
       n.name AS technique_name,
       traversal.origin_product_id AS origin_product_id,
-      traversal.path AS path
+      traversal.path AS path,
+      (
+        SELECT COALESCE(
+          jsonb_agg(
+            jsonb_build_object(
+              'id', node_detail.id,
+              'type', node_detail.type,
+              'name', node_detail.name,
+              'externalId', node_detail.external_id,
+              'label', CASE
+                WHEN node_detail.type = 'x-mitre-mapper-product' THEN COALESCE(node_detail.name, path_node.node_id)
+                WHEN COALESCE(node_detail.external_id, '') <> '' THEN node_detail.external_id
+                ELSE COALESCE(node_detail.name, path_node.node_id)
+              END
+            )
+            ORDER BY path_node.ordinality
+          ),
+          '[]'::jsonb
+        )
+        FROM unnest(traversal.path) WITH ORDINALITY AS path_node(node_id, ordinality)
+        LEFT JOIN LATERAL (
+          SELECT
+            n2.id,
+            n2.type,
+            n2.name,
+            n2.attributes->>'externalId' AS external_id
+          FROM nodes n2
+          WHERE n2.id = path_node.node_id
+          LIMIT 1
+        ) AS node_detail ON true
+      ) AS path_nodes
     FROM traversal
     JOIN nodes n ON n.id = traversal.node_id
     WHERE n.type = 'technique'
       AND n.dataset = 'mitre_attack'
       AND n.dataset_version = ${mitreDatasetVersion}
+      AND ${hasTechniqueFilter
+        ? sql`COALESCE(n.attributes->>'externalId', n.id) = ANY(${sql`${normalizedTechniqueIds}::text[]`})`
+        : sql`true`}
     ORDER BY technique_id
     LIMIT ${limit};
   `);
+
+  const normalizePathNodes = (raw: unknown): CoveragePathNode[] => {
+    const parsed = typeof raw === "string"
+      ? (() => {
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return [];
+        }
+      })()
+      : raw;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((node: unknown): CoveragePathNode | null => {
+        if (!node || typeof node !== "object") return null;
+        const entry = node as Record<string, unknown>;
+        const id = typeof entry.id === "string" ? entry.id : "";
+        if (!id) return null;
+        const type = typeof entry.type === "string" ? entry.type : "unknown";
+        const name = typeof entry.name === "string" ? entry.name : id;
+        const externalId = typeof entry.externalId === "string" ? entry.externalId : undefined;
+        const label = typeof entry.label === "string" ? entry.label : (externalId || name || id);
+        return {
+          id,
+          type,
+          name,
+          externalId,
+          label,
+        };
+      })
+      .filter((node): node is CoveragePathNode => Boolean(node));
+  };
 
   return result.rows.map(row => ({
     techniqueId: String(row.technique_id),
     techniqueName: String(row.technique_name),
     originProductId: String(row.origin_product_id),
     path: (row.path as string[]) || [],
+    pathNodes: normalizePathNodes((row as Record<string, unknown>).path_nodes),
   }));
 }
 

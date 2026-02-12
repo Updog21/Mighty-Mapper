@@ -335,12 +335,12 @@ export class ElasticAdapter implements ResourceAdapter {
     }
 
     const techniqueRegex = /\[\[rule\.threat\.technique\]\]\s*[\s\S]*?\bid\s*=\s*"([^"]+)"/g;
-    for (const match of toml.matchAll(techniqueRegex)) {
+    for (const match of Array.from(toml.matchAll(techniqueRegex))) {
       ids.add(match[1]);
     }
 
     const subtechniqueRegex = /\[\[rule\.threat\.technique\.subtechnique\]\]\s*[\s\S]*?\bid\s*=\s*"([^"]+)"/g;
-    for (const match of toml.matchAll(subtechniqueRegex)) {
+    for (const match of Array.from(toml.matchAll(subtechniqueRegex))) {
       ids.add(match[1]);
     }
 

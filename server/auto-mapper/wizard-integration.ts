@@ -123,7 +123,7 @@ export async function deriveAnalyticRequirements(
   await mitreKnowledgeGraph.ensureInitialized();
 
   const results: AnalyticRequirementTuple[] = [];
-  const dcNames = [...new Set(selectedDCs.map(dc => dc.dcName))];
+  const dcNames = Array.from(new Set(selectedDCs.map(dc => dc.dcName)));
 
   // Get channel aggregations from STIX
   const channelAggregations = await getChannelsForDCs(dcNames);

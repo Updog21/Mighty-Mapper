@@ -8,8 +8,12 @@ log() {
   echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") [entrypoint] $1" | tee -a "$LOG_FILE"
 }
 
+DB_HOST="${POSTGRES_HOST:-db}"
+DB_USER="${POSTGRES_USER:-antikythera}"
+DB_NAME="${POSTGRES_DB:-antikythera}"
+
 log "Waiting for database..."
-until pg_isready -h db -U opentidal -d opentidal >/dev/null 2>&1; do
+until pg_isready -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" >/dev/null 2>&1; do
   sleep 2
 done
 

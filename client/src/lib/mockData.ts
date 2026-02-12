@@ -164,7 +164,7 @@ export const securityProducts: SecurityProduct[] = [
 ];
 
 export function getTechniquesByTactic(tacticName: string): MitreTechnique[] {
-  return techniques.filter(t => t.tactic === tacticName);
+  return techniques.filter(t => ((t as any).tactics?.[0] || t.tactic) === tacticName);
 }
 
 export function getCoverageStats(selectedProducts: string[], selectedThreatGroup: string | null) {

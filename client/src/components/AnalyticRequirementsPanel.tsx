@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import {
   ChevronDown,
@@ -67,7 +68,10 @@ interface ChannelGroup {
 
 export interface EnrichedLogSource {
   name: string;
-  channel?: string[];
+  channel?: string[] | string;
+  requiredFields?: string[];
+  missingFields?: string[];
+  evidence?: string;
   notes?: string;
   sourceUrl?: string;
   verifiedByAi?: boolean;
@@ -77,6 +81,55 @@ export interface EnrichedEvidence {
   dcId: string;
   dcName: string;
   logSources: EnrichedLogSource[];
+  targetFields?: string[];
+}
+
+function formatChannelValue(channel?: string[] | string): string {
+  if (Array.isArray(channel)) {
+    const values = channel.map((item) => item.trim()).filter(Boolean);
+    return values.length > 0 ? values.join(', ') : 'N/A';
+  }
+  if (typeof channel === 'string' && channel.trim().length > 0) {
+    return channel.trim();
+  }
+  return 'N/A';
+}
+
+function getFidelityIndicator(source: EnrichedLogSource): {
+  label: 'High' | 'Medium' | 'Low' | 'Unknown';
+  detail: string;
+  className: string;
+} {
+  const required = Array.isArray(source.requiredFields) ? source.requiredFields.length : 0;
+  const missing = Array.isArray(source.missingFields) ? source.missingFields.length : 0;
+  const total = required + missing;
+  if (total === 0) {
+    return {
+      label: 'Unknown',
+      detail: 'No field-level mapping returned',
+      className: 'text-muted-foreground border-border',
+    };
+  }
+  const coverage = required / total;
+  if (coverage >= 0.8) {
+    return {
+      label: 'High',
+      detail: `${required}/${total} fields covered`,
+      className: 'text-emerald-600 border-emerald-500/30',
+    };
+  }
+  if (coverage >= 0.4) {
+    return {
+      label: 'Medium',
+      detail: `${required}/${total} fields covered`,
+      className: 'text-amber-500 border-amber-500/30',
+    };
+  }
+  return {
+    label: 'Low',
+    detail: `${required}/${total} fields covered`,
+    className: 'text-rose-500 border-rose-500/30',
+  };
 }
 
 /**
@@ -148,7 +201,7 @@ function RequirementCard({
         className="w-full flex items-center justify-between p-3 text-left hover:bg-muted/30 transition-colors"
       >
         <div className="flex items-center gap-2">
-          <Badge variant="outline" className="text-xs font-mono">
+          <Badge variant="secondary" className="text-xs font-mono">
             {requirement.dcId}
           </Badge>
           <span className="text-sm font-medium text-foreground">
@@ -223,52 +276,58 @@ function RequirementCard({
             <div className="space-y-2">
               <div className="text-xs font-medium text-muted-foreground">Vendor log sources</div>
               {enrichment.logSources.length > 0 ? (
-                <div className="space-y-2">
-                  {enrichment.logSources.map((source, idx) => (
-                    <div key={`${requirement.dcId}-${idx}`} className="rounded-md border border-border/60 bg-background/60 p-2 text-xs text-muted-foreground space-y-1">
-                      <div className="font-medium text-foreground">{source.name}</div>
-                      {source.channel && source.channel.length > 0 && (
-                        source.channel.length > 1 ? (
-                          <div className="space-y-1">
-                            <div className="font-semibold text-foreground">Channels:</div>
-                            <ul className="list-disc pl-4">
-                              {source.channel.map((channelEntry) => (
-                                <li key={channelEntry}>{channelEntry}</li>
-                              ))}
-                            </ul>
-                          </div>
-                        ) : (
-                          <div>
-                            <span className="font-semibold text-foreground">Channel:</span>{' '}
-                            {source.channel[0]}
-                          </div>
-                        )
-                      )}
-                      {source.notes && (
-                        <div>
-                          <span className="font-semibold text-foreground">Notes:</span> {source.notes}
-                        </div>
-                      )}
-                      {source.sourceUrl && (
-                        <div className="flex flex-wrap items-center gap-2">
-                          <a
-                            href={source.sourceUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center rounded-md border border-border/60 bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
-                          >
-                            {source.sourceUrl}
-                          </a>
-                          {source.verifiedByAi === false && (
-                            <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
-                              Unverified source
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
+                <Table className="text-xs">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="h-8">Name</TableHead>
+                      <TableHead className="h-8">Channel</TableHead>
+                      <TableHead className="h-8">Fidelity</TableHead>
+                      <TableHead className="h-8">Notes</TableHead>
+                      <TableHead className="h-8">Source</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {enrichment.logSources.map((source, idx) => {
+                      const fidelity = getFidelityIndicator(source);
+                      return (
+                        <TableRow key={`${requirement.dcId}-${idx}`}>
+                          <TableCell className="text-foreground font-medium">{source.name}</TableCell>
+                          <TableCell>{formatChannelValue(source.channel)}</TableCell>
+                          <TableCell>
+                            <div className="space-y-1">
+                              <Badge variant="outline" className={cn("text-[10px] font-semibold", fidelity.className)}>
+                                {fidelity.label}
+                              </Badge>
+                              <div className="text-[10px] text-muted-foreground">{fidelity.detail}</div>
+                            </div>
+                          </TableCell>
+                          <TableCell>{source.notes || source.evidence || 'N/A'}</TableCell>
+                          <TableCell>
+                            {source.sourceUrl ? (
+                              <div className="space-y-1">
+                                <a
+                                  href={source.sourceUrl}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-primary underline underline-offset-2 break-all"
+                                >
+                                  {source.sourceUrl}
+                                </a>
+                                {source.verifiedByAi === false && (
+                                  <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                    Unverified
+                                  </span>
+                                )}
+                              </div>
+                            ) : (
+                              'N/A'
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
               ) : (
                 <div className="text-xs text-muted-foreground">
                   No vendor log sources identified yet.
@@ -605,15 +664,13 @@ export function InlineRequirementHint({
 
   const channels = aiChannels.length > 0
     ? aiChannels
-    : [...new Set(requirements.map(r => r.channel))];
+    : Array.from(new Set(requirements.map(r => r.channel)));
   const expectedFields = Array.from(new Set(requirements.flatMap(r => r.expectedCoreFields)));
   const sampleFields = expectedFields.slice(0, 3);
   const totalFieldCount = expectedFields.length;
   const displayChannels = channels.slice(0, 2).join(', ');
   const channelSuffix = channels.length > 2 ? ` +${channels.length - 2} more` : '';
   const vendorSources = enrichment?.logSources || [];
-  const vendorPreview = vendorSources.slice(0, 2);
-  const vendorSuffix = vendorSources.length > 2 ? ` +${vendorSources.length - 2} more` : '';
 
   return (
     <div className="mt-2 pl-6 text-xs space-y-1">
@@ -629,19 +686,28 @@ export function InlineRequirementHint({
           <span>{sampleFields.join(', ')}{totalFieldCount > 3 ? '...' : ''}</span>
         </div>
       )}
-      {vendorPreview.length > 0 && (
-        <div className="flex items-start gap-1.5 text-muted-foreground">
-          <Database className="w-3 h-3 mt-0.5" />
-          <span className="font-semibold text-foreground">Vendor log sources:</span>
-          <span>
-            {vendorPreview.map((source) => {
-              const channels = Array.isArray(source.channel) && source.channel.length > 0
-                ? ` (${source.channel.join(', ')})`
-                : '';
-              return `${source.name}${channels}`;
-            }).join('; ')}
-            {vendorSuffix}
-          </span>
+      {vendorSources.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <Database className="w-3 h-3" />
+            <span className="font-semibold text-foreground">Vendor log sources</span>
+          </div>
+          <Table className="text-xs">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="h-7">Name</TableHead>
+                <TableHead className="h-7">Channel</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {vendorSources.map((source, idx) => (
+                <TableRow key={`${source.name}-${idx}`}>
+                  <TableCell className="text-foreground">{source.name}</TableCell>
+                  <TableCell>{formatChannelValue(source.channel)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </div>
       )}
     </div>

@@ -1,3 +1,4 @@
+export type { ResourceType } from '@shared/schema';
 import type { ResourceType } from '@shared/schema';
 
 export interface NormalizedMapping {

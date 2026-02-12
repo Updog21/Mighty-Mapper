@@ -1,7 +1,7 @@
-# OpenTidal (MITRE Project) - Gemini Context
+# Antikythera (MITRE Project) - Gemini Context
 
 ## Project Overview
-**OpenTidal** is a specialized security engineering platform designed to map security product capabilities to the MITRE ATT&CK framework. It acts as a bridge between detection rules (from Sigma, Splunk, Elastic, etc.) and the MITRE Knowledge Base to visualize detection coverage and identify gaps.
+**Antikythera** is a specialized security engineering platform designed to map security product capabilities to the MITRE ATT&CK framework. It acts as a bridge between detection rules (from Sigma, Splunk, Elastic, etc.) and the MITRE Knowledge Base to visualize detection coverage and identify gaps.
 
 **Core Functionality:**
 *   **Auto-Mapping:** Automatically discovers techniques detected by a product by scanning community rule repositories (SigmaHQ, CTID, Splunk Security Content, Elastic, Azure).

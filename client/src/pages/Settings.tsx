@@ -17,7 +17,7 @@ export default function Settings() {
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Settings</h1>
               <p className="text-muted-foreground text-sm mt-1">
-                Configure OpenTidal connections and preferences
+                Configure Antikythera connections and preferences
               </p>
             </header>
 

@@ -102,6 +102,12 @@ app.use((req, res, next) => {
   await registerRoutes(httpServer, app);
   adminService.scheduleMitreSync();
   adminService.scheduleRepoSync();
+  adminService.rebuildDataComponentPlatformMap('startup').catch((error) => {
+    console.error('[Startup] Failed to build data component platform map:', error);
+  });
+  adminService.rebuildDataComponentLogSources('startup').catch((error) => {
+    console.error('[Startup] Failed to build data component log source map:', error);
+  });
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;

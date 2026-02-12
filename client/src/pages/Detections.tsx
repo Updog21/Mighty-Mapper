@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { techniques } from '@/lib/mitreData';
+import { useLocation } from 'wouter';
 
 const SOURCE_ORDER: DetectionSource[] = ['splunk', 'sigma', 'elastic', 'azure', 'ctid', 'mitre_stix'];
 
@@ -194,29 +195,23 @@ const DetectionsList = memo(function DetectionsList({
               <div className="space-y-4">
                 {visibleDetections.map(detection => {
                   return (
-                    <div
+                    <fieldset
                       key={detection.id}
-                      className="border border-border rounded-lg bg-background p-4 space-y-3"
+                      className="border border-input rounded-lg bg-background p-4 pt-3 space-y-3"
                     >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h3 className="text-base font-semibold text-foreground">{detection.name}</h3>
-                            {detection.techniqueIds && detection.techniqueIds.length > 0 && (
-                              <div className="flex flex-wrap gap-1">
-                                {detection.techniqueIds.map(tid => (
-                                  <Badge key={tid} className="text-xs font-mono bg-red-500/40 text-foreground border border-red-500/50">
-                                    {tid}
-                                  </Badge>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                          {detection.description && (
-                            <p className="text-sm text-muted-foreground">{detection.description}</p>
-                          )}
-                        </div>
-                      </div>
+                      <legend className="flex flex-wrap items-center gap-2 px-2 text-base font-semibold text-foreground">
+                        {detection.name}
+                        {detection.techniqueIds && detection.techniqueIds.length > 0 && (
+                          detection.techniqueIds.map(tid => (
+                            <Badge key={tid} className="text-xs font-mono bg-red-500/40 text-foreground border border-red-500/50">
+                              {tid}
+                            </Badge>
+                          ))
+                        )}
+                      </legend>
+                      {detection.description && (
+                        <p className="text-sm text-muted-foreground">{detection.description}</p>
+                      )}
 
                       <div className="relative">
                         <Button
@@ -243,7 +238,7 @@ const DetectionsList = memo(function DetectionsList({
                         </Button>
                         <LazyCodeBlock detection={detection} />
                       </div>
-                    </div>
+                    </fieldset>
                   );
                 })}
               </div>
@@ -272,6 +267,7 @@ const DetectionsList = memo(function DetectionsList({
 });
 
 export default function Detections() {
+  const [location] = useLocation();
   const [sourceFilters, setSourceFilters] = useState<Set<DetectionSource>>(new Set());
   const [techniqueFilters, setTechniqueFilters] = useState<Set<string>>(new Set());
   const [isTechniquePanelOpen, setIsTechniquePanelOpen] = useState(false);
@@ -281,6 +277,12 @@ export default function Detections() {
   const [visibleCounts, setVisibleCounts] = useState<Record<string, number>>({});
   const [techniqueNames, setTechniqueNames] = useState<Record<string, string>>({});
   const { data, isLoading, error } = useDetections(appliedSearch);
+  const techniqueFilterFromQuery = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    const raw = (new URLSearchParams(window.location.search).get('technique') || '').trim().toUpperCase();
+    const match = raw.match(/^T\d{4}(?:\.\d{3})?$/);
+    return match ? match[0] : '';
+  }, [location]);
 
   const availableSources = useMemo(() => {
     const set = new Set<DetectionSource>();
@@ -298,6 +300,17 @@ export default function Detections() {
     }
   }, [availableSources.join('|')]);
 
+  useEffect(() => {
+    if (!techniqueFilterFromQuery) return;
+    setTechniqueFilters((prev) => {
+      if (prev.has(techniqueFilterFromQuery)) return prev;
+      const next = new Set(prev);
+      next.add(techniqueFilterFromQuery);
+      return next;
+    });
+    setIsTechniquePanelOpen(true);
+  }, [techniqueFilterFromQuery]);
+
   const groupedDetections = useMemo(() => {
     const groups = new Map<DetectionSource, Detection[]>();
     (data || []).forEach((detection) => {
@@ -305,7 +318,7 @@ export default function Detections() {
       if (!sourceFilters.has(source)) return;
       if (techniqueFilters.size > 0) {
         const detectionTechniques = detection.techniqueIds || [];
-        const hasTechnique = detectionTechniques.some(tid => techniqueFilters.has(tid));
+        const hasTechnique = detectionTechniques.some(tid => techniqueFilters.has(tid.trim().toUpperCase()));
         if (!hasTechnique) return;
       }
       const existing = groups.get(source) || [];
@@ -323,18 +336,24 @@ export default function Detections() {
   const availableTechniques = useMemo(() => {
     const set = new Set<string>();
     (data || []).forEach(detection => {
-      (detection.techniqueIds || []).forEach(tid => set.add(tid));
+      (detection.techniqueIds || []).forEach(tid => {
+        const normalized = tid.trim().toUpperCase();
+        if (normalized) set.add(normalized);
+      });
     });
     return Array.from(set).sort();
   }, [data]);
   const techniqueNameMap = useMemo(() => {
     const map = new Map<string, string>();
+    // API-fetched names take priority
     Object.entries(techniqueNames).forEach(([id, name]) => {
-      map.set(id.toUpperCase(), name);
+      map.set(id.trim().toUpperCase(), name);
     });
+    // Fill in from static MITRE data
     techniques.forEach((tech) => {
-      if (!map.has(tech.id.toUpperCase())) {
-        map.set(tech.id.toUpperCase(), tech.name);
+      const key = tech.id.trim().toUpperCase();
+      if (!map.has(key)) {
+        map.set(key, tech.name);
       }
     });
     return map;
@@ -467,12 +486,12 @@ export default function Detections() {
                           }}
                           className={cn(
                             "text-xs h-7",
-                            isActive && source === 'sigma' && "bg-purple-600 hover:bg-purple-700",
-                            isActive && source === 'elastic' && "bg-orange-600 hover:bg-orange-700",
-                            isActive && source === 'splunk' && "bg-green-600 hover:bg-green-700",
-                            isActive && source === 'azure' && "bg-sky-600 hover:bg-sky-700",
-                            isActive && source === 'ctid' && "bg-blue-600 hover:bg-blue-700",
-                            isActive && source === 'mitre_stix' && "bg-red-600 hover:bg-red-700"
+                            isActive && source === 'sigma' && "bg-purple-600 hover:bg-purple-700 text-white",
+                            isActive && source === 'elastic' && "bg-orange-600 hover:bg-orange-700 text-white",
+                            isActive && source === 'splunk' && "bg-green-600 hover:bg-green-700 text-white",
+                            isActive && source === 'azure' && "bg-sky-600 hover:bg-sky-700 text-white",
+                            isActive && source === 'ctid' && "bg-blue-600 hover:bg-blue-700 text-white",
+                            isActive && source === 'mitre_stix' && "bg-red-600 hover:bg-red-700 text-white"
                           )}
                         >
                           {label}
@@ -505,6 +524,11 @@ export default function Detections() {
                   </div>
                 </div>
                 <div className="space-y-3">
+                  {techniqueFilterFromQuery ? (
+                    <p className="text-xs text-muted-foreground">
+                      Filtered by technique: <span className="font-mono">{techniqueFilterFromQuery}</span>
+                    </p>
+                  ) : null}
                   <Button
                     variant="ghost"
                     size="sm"
@@ -548,11 +572,13 @@ export default function Detections() {
                                 setTechniqueFilters(next);
                               }}
                             >
-                              <div className="flex flex-col">
+                              <div className="flex items-center gap-2">
                                 <span className="font-mono">{tid}</span>
-                                <span className="text-[11px] text-muted-foreground">
-                                  {techniqueNameMap.get(tid.toUpperCase()) || 'Unknown technique'}
-                                </span>
+                                {techniqueNameMap.get(tid.toUpperCase()) && (
+                                  <span className="text-[11px] text-muted-foreground">
+                                    {techniqueNameMap.get(tid.toUpperCase())}
+                                  </span>
+                                )}
                               </div>
                               <span className="text-[10px] text-muted-foreground">Add</span>
                             </button>
