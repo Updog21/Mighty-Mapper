@@ -186,21 +186,29 @@ export class ElasticAdapter implements ResourceAdapter {
 
       const logSources = this.extractDataSourceTags(rule.tags);
       const platforms = this.extractPlatformTags(rule.tags);
-      const ruleTechniqueIds = new Set<string>();
+      const explicitTechniqueIds = new Set<string>();
       for (const id of rule.techniqueIds || []) {
         const normalized = mitreKnowledgeGraph.normalizeTechniqueId(id);
-        if (normalized) ruleTechniqueIds.add(normalized);
+        if (normalized) explicitTechniqueIds.add(normalized);
       }
 
-      if (ruleTechniqueIds.size === 0 && logSources && logSources.length > 0) {
+      const inferredTechniqueIds = new Set<string>();
+      if (explicitTechniqueIds.size === 0 && logSources && logSources.length > 0) {
         const inferred = mitreKnowledgeGraph.getTechniquesBySourceHints(
           logSources,
           this.extractTactics(rule.tags)
         );
-        inferred.forEach(tech => ruleTechniqueIds.add(tech.id));
+        inferred.forEach(tech => inferredTechniqueIds.add(tech.id));
       }
 
-      ruleTechniqueIds.forEach(tid => techniqueIds.add(tid));
+      const ruleTechniqueIds = explicitTechniqueIds.size > 0
+        ? explicitTechniqueIds
+        : inferredTechniqueIds;
+      const coverageKind: AnalyticMapping['coverageKind'] = explicitTechniqueIds.size > 0 ? 'detect' : inferredTechniqueIds.size > 0 ? 'visibility' : 'candidate';
+      const evidenceTier: AnalyticMapping['evidenceTier'] = explicitTechniqueIds.size > 0 ? 'strong' : inferredTechniqueIds.size > 0 ? 'weak' : 'weak';
+      const mappingMethod: AnalyticMapping['mappingMethod'] = explicitTechniqueIds.size > 0 ? 'explicit_attack_id' : 'source_hint_inference';
+
+      explicitTechniqueIds.forEach(tid => techniqueIds.add(tid));
 
       const rawSource = rule.integration?.[0] || rule.index?.[0];
 
@@ -219,11 +227,19 @@ export class ElasticAdapter implements ResourceAdapter {
         sourceFile: rule.filePath ? rule.filePath.split('/').pop() : undefined,
         repoName: 'Elastic',
         ruleId: rule.rule_id,
+        mappingMethod,
+        evidenceTier,
+        coverageKind,
         metadata: {
           log_sources: logSources,
           query: rule.query,
           setup: rule.setup,
           mutable_elements: rule.investigationFields,
+          explicit_technique_ids: Array.from(explicitTechniqueIds),
+          inferred_technique_ids: Array.from(inferredTechniqueIds),
+          mapping_method: mappingMethod,
+          evidence_tier: evidenceTier,
+          coverage_kind: coverageKind,
         },
       });
 

@@ -14,8 +14,13 @@ export function getHybridStrategies(
   ssmCapabilities: SsmCapability[],
   stixStrategies: StixDetectionStrategy[] | undefined,
   fallbackStrategies: DetectionStrategy[],
-  targetPlatforms: string[]
+  targetPlatforms: string[],
+  techniqueDataComponents?: Record<string, Array<{ id: string; name: string }>>,
+  options?: {
+    strictPlatformScopeForUnknownAnalytics?: boolean;
+  }
 ): Strategy[] {
+  const strictPlatformScopeForUnknownAnalytics = options?.strictPlatformScopeForUnknownAnalytics === true;
   const hasSsmCoverage = ssmCapabilities.length > 0;
   const baseStrategies = hasSsmCoverage
     ? (stixStrategies || [])
@@ -45,30 +50,49 @@ export function getHybridStrategies(
 
   const synthesizedStrategies: StixDetectionStrategy[] = Array.from(coveredTechniques)
     .filter(techId => !techniquesWithStrategies.has(normalizeTechniqueId(techId)))
-    .map(techId => ({
-      id: `SYNTH-${techId}`,
-      name: `Detect ${techniqueNames.get(techId) || techId}`,
-      description: 'Synthesized detection strategy (no official MITRE strategy available).',
-      techniques: [techId],
-      analytics: [],
-    }));
+    .map(techId => {
+      // Derive data component IDs from the server-provided technique→DC mapping
+      const techDcRefs = techniqueDataComponents?.[techId] || techniqueDataComponents?.[normalizeTechniqueId(techId)] || [];
+      const dcIds = techDcRefs.map(dc => dc.id);
+      return {
+        id: `SYNTH-${techId}`,
+        name: `Detect ${techniqueNames.get(techId) || techId}`,
+        description: 'Synthesized detection strategy (no official MITRE strategy available).',
+        techniques: [techId],
+        analytics: dcIds.length > 0
+          ? [{
+              id: `synth-dc-${techId}`,
+              name: 'Expected Telemetry',
+              description: `Data components derived from technique metadata for ${techniqueNames.get(techId) || techId}.`,
+              platforms: targetPlatforms.length > 0 ? targetPlatforms : [],
+              dataComponents: dcIds,
+              logSources: [],
+              mutableElements: [],
+            }]
+          : [],
+      };
+    });
 
   const strategiesToRender = [...baseStrategies, ...synthesizedStrategies];
 
   return strategiesToRender.map((strategy): Strategy => {
     const strategyAnalytics = Array.isArray(strategy.analytics) ? strategy.analytics : [];
     const filteredAnalytics = targetPlatforms.length > 0
-      ? strategyAnalytics.filter((analytic: any) =>
-          platformMatchesAny(analytic.platforms || [], targetPlatforms)
-        )
+      ? strategyAnalytics.filter((analytic: any) => {
+          const analyticPlatforms = analytic.platforms || [];
+          if (analyticPlatforms.length === 0) {
+            // Strict mode: hide analytics with unknown platform scope
+            // (used for wizard-guided flows where platform selection must be honored).
+            return !strictPlatformScopeForUnknownAnalytics;
+          }
+          return platformMatchesAny(analyticPlatforms, targetPlatforms);
+        })
       : strategyAnalytics;
-    const analyticsToRender = filteredAnalytics.length > 0 ? filteredAnalytics : strategyAnalytics;
 
-    // If platform filtering is too strict, fall back to strategy analytics instead of showing zero.
-    if (analyticsToRender.length > 0) {
+    if (filteredAnalytics.length > 0) {
       return {
         ...strategy,
-        analytics: analyticsToRender,
+        analytics: filteredAnalytics,
       } as Strategy;
     }
 
@@ -84,6 +108,20 @@ export function getHybridStrategies(
     }
 
     const hasMetadata = normalizedStrategyTechniques.some(techId => metadataByTechnique.has(techId));
+    // Gather data components from technique metadata for the injected analytic
+    const injectedDcIds: string[] = [];
+    if (techniqueDataComponents) {
+      const seen = new Set<string>();
+      normalizedStrategyTechniques.forEach(techId => {
+        const dcRefs = techniqueDataComponents[techId] || [];
+        dcRefs.forEach(dc => {
+          if (!seen.has(dc.id)) {
+            seen.add(dc.id);
+            injectedDcIds.push(dc.id);
+          }
+        });
+      });
+    }
     const injectedAnalytic: StixAnalytic = {
       id: `custom-${strategy.id}`,
       name: 'Custom Detection Logic',
@@ -91,7 +129,7 @@ export function getHybridStrategies(
         ? 'Detection logic derived from mapped product evidence.'
         : 'Detection logic derived from mapped product coverage.',
       platforms: targetPlatforms.length > 0 ? targetPlatforms : [],
-      dataComponents: [],
+      dataComponents: injectedDcIds,
       logSources: [],
       mutableElements: [],
     };

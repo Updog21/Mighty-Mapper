@@ -221,20 +221,28 @@ export class SplunkAdapter implements ResourceAdapter {
     const seenDataSources = new Set<string>();
 
     for (const detection of detections) {
-      const ruleTechniqueIds = new Set<string>();
+      const explicitTechniqueIds = new Set<string>();
       for (const id of detection.mitre_attack_id || []) {
         const normalized = mitreKnowledgeGraph.normalizeTechniqueId(id);
-        if (normalized) ruleTechniqueIds.add(normalized);
+        if (normalized) explicitTechniqueIds.add(normalized);
       }
-      if (ruleTechniqueIds.size === 0 && detection.data_source && detection.data_source.length > 0) {
+      const inferredTechniqueIds = new Set<string>();
+      if (explicitTechniqueIds.size === 0 && detection.data_source && detection.data_source.length > 0) {
         const inferred = mitreKnowledgeGraph.getTechniquesBySourceHints(
           detection.data_source,
           this.extractTactics(detection.tags)
         );
-        inferred.forEach(tech => ruleTechniqueIds.add(tech.id));
+        inferred.forEach(tech => inferredTechniqueIds.add(tech.id));
       }
 
-      ruleTechniqueIds.forEach(tid => techniqueIds.add(tid));
+      const ruleTechniqueIds = explicitTechniqueIds.size > 0
+        ? explicitTechniqueIds
+        : inferredTechniqueIds;
+      const coverageKind: AnalyticMapping['coverageKind'] = explicitTechniqueIds.size > 0 ? 'detect' : inferredTechniqueIds.size > 0 ? 'visibility' : 'candidate';
+      const evidenceTier: AnalyticMapping['evidenceTier'] = explicitTechniqueIds.size > 0 ? 'strong' : inferredTechniqueIds.size > 0 ? 'weak' : 'weak';
+      const mappingMethod: AnalyticMapping['mappingMethod'] = explicitTechniqueIds.size > 0 ? 'explicit_attack_id' : 'source_hint_inference';
+
+      explicitTechniqueIds.forEach(tid => techniqueIds.add(tid));
 
       const rawSource = this.extractRawSource(detection);
 
@@ -262,11 +270,20 @@ export class SplunkAdapter implements ResourceAdapter {
         sourceFile: detection.filePath ? detection.filePath.split('/').pop() : undefined,
         repoName: 'Splunk',
         ruleId: detection.id,
+        mappingMethod,
+        evidenceTier,
+        coverageKind,
+        requiresValidation: explicitTechniqueIds.size > 0,
         metadata: {
           log_sources: detection.data_source,
           query: detection.search,
           description: detection.description,
           author: detection.tags?.find(tag => tag.toLowerCase().startsWith('author:'))?.split(':').slice(1).join(':').trim(),
+          explicit_technique_ids: Array.from(explicitTechniqueIds),
+          inferred_technique_ids: Array.from(inferredTechniqueIds),
+          mapping_method: mappingMethod,
+          evidence_tier: evidenceTier,
+          coverage_kind: coverageKind,
         },
       });
 

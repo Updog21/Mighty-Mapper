@@ -10,6 +10,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { useLocation, useRoute } from 'wouter';
 
 function convertProductToAsset(product: Product): Asset {
   return {
@@ -26,8 +27,11 @@ function convertProductToAsset(product: Product): Asset {
 }
 
 export default function Products() {
+  const [location, setLocation] = useLocation();
+  const [isProductRoute, productRouteParams] = useRoute<{ productId: string }>('/products/:productId');
+  const routeProductId = isProductRoute ? decodeURIComponent(productRouteParams.productId) : null;
   const [selectedProduct, setSelectedProduct] = useState<Asset | null>(null);
-  const { data: dbProducts = [] } = useProducts();
+  const { data: dbProducts = [], isLoading: isProductsLoading } = useProducts();
   const deleteProduct = useDeleteProduct();
   const { toast } = useToast();
   const [selectedCustomProducts, setSelectedCustomProducts] = useState<Set<string>>(new Set());
@@ -44,6 +48,46 @@ export default function Products() {
     }
     return Array.from(map.values());
   }, [dbProducts]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const productId = routeProductId || params.get('productId');
+
+    if (!productId) {
+      setSelectedProduct(null);
+      return;
+    }
+
+    const localProduct = mergedProducts.find((candidate) => candidate.id === productId);
+    if (localProduct) {
+      setSelectedProduct(localProduct);
+      return;
+    }
+
+    if (isProductsLoading) {
+      return;
+    }
+
+    let cancelled = false;
+    fetch(`/api/products/${encodeURIComponent(productId)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: Product | null) => {
+        if (cancelled || !data) {
+          setSelectedProduct(null);
+          return;
+        }
+        setSelectedProduct(convertProductToAsset(data));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSelectedProduct(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isProductsLoading, location, mergedProducts, routeProductId]);
 
   const selectableCustomIds = useMemo(
     () => mergedProducts.filter(product => product.source === 'custom').map(product => product.id),
@@ -121,7 +165,7 @@ export default function Products() {
         <main className="flex-1 overflow-auto">
           <div className="grid-pattern min-h-full">
             <div className="p-6">
-              <ProductView product={selectedProduct} onBack={() => setSelectedProduct(null)} />
+              <ProductView product={selectedProduct} onBack={() => setLocation('/products')} />
             </div>
           </div>
         </main>
@@ -217,7 +261,7 @@ export default function Products() {
                         "bg-background border-border hover:border-primary/50 transition-all cursor-pointer group",
                         isSelected && "ring-2 ring-primary/30"
                       )}
-                      onClick={() => setSelectedProduct(product)}
+                      onClick={() => setLocation(`/products/${encodeURIComponent(product.id)}`)}
                       data-testid={`card-product-${product.id}`}
                     >
                       <CardContent className="p-4">

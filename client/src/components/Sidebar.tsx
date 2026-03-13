@@ -90,6 +90,11 @@ const dashboardNavItems = [
   { icon: Wrench, label: 'Admin Tasks', href: '/admin' },
 ];
 
+function isActivePath(currentPath: string, href: string) {
+  if (href === '/') return currentPath === '/';
+  return currentPath === href || currentPath.startsWith(`${href}/`);
+}
+
 export function Sidebar({ variant = 'default' }: { variant?: SidebarVariant }) {
   if (variant === 'dashboard') {
     return <DashboardSidebar />;
@@ -122,7 +127,7 @@ export function Sidebar({ variant = 'default' }: { variant?: SidebarVariant }) {
 
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
         {navItems.map((item) => {
-          const isActive = location === item.href;
+          const isActive = isActivePath(location, item.href);
           return (
             <Link
               key={item.href}
@@ -157,7 +162,7 @@ export function Sidebar({ variant = 'default' }: { variant?: SidebarVariant }) {
         {collapsed && <div className="h-4" />}
 
         {docItems.map((item) => {
-          const isActive = location === item.href;
+          const isActive = isActivePath(location, item.href);
           return (
             <Link
               key={item.href}
@@ -234,7 +239,7 @@ function DashboardSidebar() {
       <nav className="flex-1 px-3">
         <div className="space-y-1">
           {dashboardNavItems.map((item) => {
-            const isActive = item.href ? location === item.href : (item as any).active;
+            const isActive = item.href ? isActivePath(location, item.href) : (item as any).active;
             const navClassName = `w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-md transition-colors ${
               isActive
                 ? 'bg-primary/10 text-primary font-medium'
@@ -308,10 +313,19 @@ function DashboardSidebar() {
           {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
           {theme === 'light' ? 'Dark Mode' : 'Light Mode'}
         </button>
-        <button className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground rounded-md">
+        <Link
+          href="/settings"
+          className={cn(
+            "w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-md transition-colors",
+            isActivePath(location, "/settings")
+              ? "bg-primary/10 text-primary font-medium"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground"
+          )}
+          data-testid="link-dashboard-settings"
+        >
           <Settings className="w-4 h-4" />
           Settings
-        </button>
+        </Link>
         <button className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground rounded-md">
           <HelpCircle className="w-4 h-4" />
           Help

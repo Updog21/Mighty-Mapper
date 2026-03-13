@@ -1,6 +1,17 @@
 export type { ResourceType } from '@shared/schema';
 import type { ResourceType } from '@shared/schema';
 
+export type AnalyticMappingMethod =
+  | 'explicit_attack_id'
+  | 'ctid_import'
+  | 'tactic_data_component_inference'
+  | 'source_hint_inference'
+  | 'stream_data_component_inference'
+  | 'mitre_keyword_match';
+
+export type AnalyticEvidenceTier = 'strong' | 'medium' | 'weak';
+export type AnalyticCoverageKind = 'detect' | 'visibility' | 'candidate';
+
 export interface NormalizedMapping {
   productId: string;
   source: ResourceType;
@@ -28,6 +39,10 @@ export interface AnalyticMapping {
   rawSource?: string;
   streamStatus?: 'verified' | 'heuristic';
   metadata?: Record<string, unknown>;
+  mappingMethod?: AnalyticMappingMethod;
+  evidenceTier?: AnalyticEvidenceTier;
+  coverageKind?: AnalyticCoverageKind;
+  requiresValidation?: boolean;
   // AI Validation Fields
   validationStatus?: 'pending' | 'valid' | 'invalid' | 'uncertain';
   aiConfidence?: number;

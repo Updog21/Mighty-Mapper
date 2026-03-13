@@ -122,6 +122,13 @@ function normalizeDataComponentId(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function normalizeSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
 function getPrimaryTactic(technique?: { tactic?: string; tactics?: string[] }): string | undefined {
   if (!technique) return undefined;
   if (Array.isArray(technique.tactics) && technique.tactics.length > 0) {
@@ -224,6 +231,27 @@ const HUMAN_SURFACE_DENYLIST = [
   'T1525',
 ];
 
+const TACTIC_WEIGHTS: Record<string, number> = {
+  'initial access': 3.0,
+  'execution': 3.0,
+  'credential access': 3.0,
+  'persistence': 2.5,
+  'privilege escalation': 2.5,
+  'defense evasion': 2.0,
+  'lateral movement': 2.0,
+  'command and control': 2.0,
+  'discovery': 1.5,
+  'collection': 1.5,
+  'exfiltration': 1.0,
+  'impact': 1.0,
+  'resource development': 0.5,
+  'reconnaissance': 0.5,
+};
+
+function getTacticWeight(tactic: string): number {
+  return TACTIC_WEIGHTS[normalizeTacticKey(tactic)] ?? 1.0;
+}
+
 function normalizeTacticKey(value?: string | null): string {
   if (!value) return '';
   return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -271,22 +299,23 @@ function inferScenarioAnswers(productName: string, platforms: string[]): Scenari
   };
 }
 
-function getScenarioDropReason(
+function getScenarioDropReasons(
   techniqueId: string,
   tactic: string,
   answers: ScenarioAnswers
-): ScenarioDropReason | null {
+): ScenarioDropReason[] {
+  const reasons: ScenarioDropReason[] = [];
   const normalizedTactic = normalizeTacticKey(tactic);
   if (answers.blackBox && BLACK_BOX_DROP_TACTICS.has(normalizedTactic)) {
-    return 'blackBox';
+    reasons.push('blackBox');
   }
   if (answers.passThrough && PASS_THROUGH_DROP_TACTICS.has(normalizedTactic)) {
-    return 'passThrough';
+    reasons.push('passThrough');
   }
   if (!answers.humanSurface && HUMAN_SURFACE_DENYLIST.some((prefix) => techniqueMatchesPrefix(techniqueId, prefix))) {
-    return 'humanSurface';
+    reasons.push('humanSurface');
   }
-  return null;
+  return reasons;
 }
 
 function getScenarioBoostMultiplier(tactic: string, answers: ScenarioAnswers): number {
@@ -378,6 +407,7 @@ function DataComponentDetail({
   onClose: () => void;
   vendorEvidence?: AiEvidenceEntry;
 }) {
+  const [isVendorLogSourcesExpanded, setIsVendorLogSourcesExpanded] = useState(false);
   const prefixes = getPlatformPrefixes(platform);
   const formatVendorChannel = (value?: string[] | null) => {
     if (!value || value.length === 0) return '-';
@@ -463,45 +493,59 @@ function DataComponentDetail({
 
           {vendorEvidence && vendorEvidence.logSources.length > 0 && (
             <div>
-              <h3 className="text-sm font-semibold text-foreground mb-3 flex items-center gap-2">
-                <Database className="w-4 h-4 text-primary" />
-                Vendor Log Sources
-              </h3>
-              <div className="rounded-md overflow-hidden border border-border keep-border">
-                <table className="w-full text-sm">
-                  <thead className="bg-muted/50">
-                    <tr>
-                      <th className="text-left px-4 py-2 font-medium text-muted-foreground">Name</th>
-                      <th className="text-left px-4 py-2 font-medium text-muted-foreground">Channel</th>
-                      <th className="text-left px-4 py-2 font-medium text-muted-foreground">Notes</th>
-                      <th className="text-left px-4 py-2 font-medium text-muted-foreground">Source</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {vendorEvidence.logSources.map((source, idx) => (
-                      <tr key={`${dc.id}-vendor-${idx}`}>
-                        <td className="px-4 py-2 font-mono text-foreground">{source.name}</td>
-                        <td className="px-4 py-2 text-muted-foreground">{formatVendorChannel(source.channel)}</td>
-                        <td className="px-4 py-2 text-muted-foreground">{source.notes || '-'}</td>
-                        <td className="px-4 py-2">
-                          {source.sourceUrl ? (
-                            <a
-                              href={source.sourceUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="inline-flex items-center rounded-md border border-border/60 bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
-                            >
-                              Reference
-                            </a>
-                          ) : (
-                            <span className="text-muted-foreground">-</span>
-                          )}
-                        </td>
+              <button
+                type="button"
+                onClick={() => setIsVendorLogSourcesExpanded((prev) => !prev)}
+                className="w-full flex items-center justify-between rounded-md border border-border/60 bg-background/60 px-3 py-2 text-left hover:bg-muted/30 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-primary" />
+                  <span className="text-sm font-semibold text-foreground">Vendor Log Sources</span>
+                </div>
+                <ChevronRight
+                  className={cn(
+                    "w-4 h-4 text-muted-foreground transition-transform",
+                    isVendorLogSourcesExpanded && "rotate-90"
+                  )}
+                />
+              </button>
+              {isVendorLogSourcesExpanded && (
+                <div className="mt-3 rounded-md overflow-hidden border border-border keep-border">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted/50">
+                      <tr>
+                        <th className="text-left px-4 py-2 font-medium text-muted-foreground">Name</th>
+                        <th className="text-left px-4 py-2 font-medium text-muted-foreground">Channel</th>
+                        <th className="text-left px-4 py-2 font-medium text-muted-foreground">Notes</th>
+                        <th className="text-left px-4 py-2 font-medium text-muted-foreground">Source</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {vendorEvidence.logSources.map((source, idx) => (
+                        <tr key={`${dc.id}-vendor-${idx}`}>
+                          <td className="px-4 py-2 font-mono text-foreground">{source.name}</td>
+                          <td className="px-4 py-2 text-muted-foreground">{formatVendorChannel(source.channel)}</td>
+                          <td className="px-4 py-2 text-muted-foreground">{source.notes || '-'}</td>
+                          <td className="px-4 py-2">
+                            {source.sourceUrl ? (
+                              <a
+                                href={source.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center rounded-md border border-border/60 bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
+                              >
+                                Reference
+                              </a>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           )}
 
@@ -575,6 +619,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const [showSourceFilter, setShowSourceFilter] = useState(false);
   const [showAllTechniques, setShowAllTechniques] = useState(false);
   const [showAllDataComponents, setShowAllDataComponents] = useState(false);
+  const [isVendorLogSourcesExpanded, setIsVendorLogSourcesExpanded] = useState(false);
   const [exportNotes, setExportNotes] = useState('');
   const [newAlias, setNewAlias] = useState('');
   const [isEvidenceDialogOpen, setIsEvidenceDialogOpen] = useState(false);
@@ -630,7 +675,11 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const { data: ssmCapabilities = [] } = useProductSsm(ssmProductId);
 
   const ssmCoverage = useMemo(() => {
-    return getAggregateCoverage(ssmCapabilities);
+    return getAggregateCoverage(ssmCapabilities, 'detect');
+  }, [ssmCapabilities]);
+
+  const ssmVisibilityCoverage = useMemo(() => {
+    return getAggregateCoverage(ssmCapabilities, 'visibility');
   }, [ssmCapabilities]);
 
   const techniqueIndex = useMemo(() => {
@@ -698,6 +747,49 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       return value as Record<string, unknown>;
     }
     return {};
+  };
+
+  const extractMappedDataComponentsFromMetadata = (metadata: Record<string, unknown> | null): string[] => {
+    if (!metadata) return [];
+    const mapped = metadata.mapped_data_components ?? metadata.mappedDataComponents;
+    if (!Array.isArray(mapped)) return [];
+
+    const values = new Set<string>();
+    const push = (value: unknown) => {
+      if (typeof value !== 'string') return;
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      values.add(trimmed);
+
+      const dcIdMatch = trimmed.toUpperCase().match(/DC\d{4}/);
+      if (dcIdMatch) values.add(dcIdMatch[0]);
+
+      const parts = trimmed.split(' - ');
+      if (parts.length > 1) {
+        const suffix = parts.slice(1).join(' - ').trim();
+        if (suffix) values.add(suffix);
+      }
+    };
+
+    mapped.forEach((entry) => {
+      if (typeof entry === 'string') {
+        push(entry);
+        return;
+      }
+      if (!entry || typeof entry !== 'object') return;
+      const obj = entry as {
+        id?: unknown;
+        name?: unknown;
+        dataComponentId?: unknown;
+        dataComponentName?: unknown;
+      };
+      push(obj.id);
+      push(obj.name);
+      push(obj.dataComponentId);
+      push(obj.dataComponentName);
+    });
+
+    return Array.from(values);
   };
 
   const verifiedEvidence = useMemo(() => {
@@ -979,6 +1071,23 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     return normalizePlatformList(combined);
   }, [product.platforms, productData?.hybridSelectorValues]);
 
+  const mappedPlatforms = useMemo(() => {
+    const set = new Set<string>();
+    allPlatforms.forEach((platformValue) => set.add(platformValue));
+
+    ssmCapabilities.forEach((capability) => {
+      if (!capability.platform) return;
+      const normalized = normalizePlatformList([capability.platform]);
+      if (normalized.length > 0) {
+        normalized.forEach((platformValue) => set.add(platformValue));
+      } else {
+        set.add(capability.platform);
+      }
+    });
+
+    return Array.from(set);
+  }, [allPlatforms, ssmCapabilities]);
+
   useEffect(() => {
     const scenarioKey = `${productKey}|${productTitle}|${allPlatforms.join(',')}`;
     if (scenarioDefaultsKeyRef.current === scenarioKey) return;
@@ -989,6 +1098,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     setScenarioOverrideTechniqueIds(new Set());
     scenarioDefaultsKeyRef.current = scenarioKey;
   }, [allPlatforms, productKey, productTitle]);
+
+  useEffect(() => {
+    setIsVendorLogSourcesExpanded(false);
+  }, [productKey]);
 
   const hasWizardGuidedCoverage = useMemo(
     () => ssmCapabilities.some((capability) => {
@@ -1014,17 +1127,15 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     return Array.from(set);
   }, [stixScopedCapabilities]);
 
-  // Wizard-guided coverage should show the full MITRE strategy/analytic content from the final wizard step.
-  // Avoid additional platform filtering here to prevent "Analytics (0)" regressions in tactic drilldown.
-  const stixMappingPlatforms = useMemo(
-    () => (hasWizardGuidedCoverage ? [] : allPlatforms),
-    [hasWizardGuidedCoverage, allPlatforms]
-  );
+  // Always pass platforms for proper scoping. Analytics without platform metadata
+  // (e.g. wizard-sourced) are treated as platform-agnostic by the hybrid strategy builder.
+  const stixMappingPlatforms = allPlatforms;
 
   const { data: ssmStixMapping } = useQuery<{
     detectionStrategies: StixDetectionStrategy[];
     dataComponents: StixDataComponent[];
     techniqueNames: Record<string, string>;
+    techniqueDataComponents?: Record<string, Array<{ id: string; name: string }>>;
   }>({
     queryKey: ['ssm-stix-mapping', productKey, stixTechniqueIds.join('|'), stixMappingPlatforms.join('|')],
     queryFn: async () => {
@@ -1254,9 +1365,20 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       stixScopedCapabilities,
       ssmStixMapping?.detectionStrategies,
       getDetectionStrategiesForProduct(productKey),
-      stixMappingPlatforms
+      stixMappingPlatforms,
+      ssmStixMapping?.techniqueDataComponents,
+      {
+        strictPlatformScopeForUnknownAnalytics: hasWizardGuidedCoverage,
+      }
     );
-  }, [stixScopedCapabilities, ssmStixMapping?.detectionStrategies, productKey, stixMappingPlatforms]);
+  }, [
+    stixScopedCapabilities,
+    ssmStixMapping?.detectionStrategies,
+    productKey,
+    stixMappingPlatforms,
+    ssmStixMapping?.techniqueDataComponents,
+    hasWizardGuidedCoverage,
+  ]);
   const analyticById = useMemo(() => {
     const map = new Map<string, AnalyticItem>();
     strategies.forEach(strategy => {
@@ -1694,6 +1816,46 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     };
   }, []);
 
+  const communityProductMatchTerms = useMemo(() => {
+    const terms = new Set<string>();
+    const add = (value?: string | null) => {
+      if (!value) return;
+      const normalized = normalizeSearchText(value);
+      if (!normalized || normalized.length < 4) return;
+      terms.add(normalized);
+    };
+
+    add(productTitle);
+    add(product.productName);
+    add(`${product.vendor} ${product.productName}`);
+    productAliases.forEach((alias) => add(alias.alias));
+
+    return Array.from(terms);
+  }, [product.productName, product.vendor, productAliases, productTitle]);
+
+  const communityAnalyticMentionsProduct = useMemo(() => {
+    return (analytic: AnalyticMapping): boolean => {
+      if (communityProductMatchTerms.length === 0) return false;
+      const logSourcesText = Array.isArray(analytic.logSources) ? analytic.logSources.join(' ') : '';
+      const haystack = normalizeSearchText([
+        analytic.name,
+        analytic.description,
+        analytic.howToImplement,
+        analytic.query,
+        analytic.sourceFile,
+        logSourcesText,
+      ].filter(Boolean).join(' '));
+
+      if (!haystack) return false;
+      return communityProductMatchTerms.some((term) => haystack.includes(term));
+    };
+  }, [communityProductMatchTerms]);
+
+  const vendorMatchedCommunityAnalytics = useMemo(() => {
+    const analytics = autoMapping.enrichedMapping?.communityAnalytics || [];
+    return analytics.filter((analytic) => communityAnalyticMentionsProduct(analytic));
+  }, [autoMapping.enrichedMapping?.communityAnalytics, communityAnalyticMentionsProduct]);
+
   const dataComponentsByName = useMemo(() => {
     const map = new Map<string, DataComponentRef[]>();
     Object.values(dataComponents).forEach(dc => {
@@ -1704,6 +1866,61 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     });
     return map;
   }, []);
+
+  const expandDataComponentMatchKeys = useMemo(() => {
+    const stixById = new Map<string, { id: string; name: string }>();
+    const stixByName = new Map<string, { id: string; name: string }>();
+    (ssmStixMapping?.dataComponents || []).forEach((dc) => {
+      stixById.set(normalizeDataComponentId(dc.id), { id: dc.id, name: dc.name });
+      stixByName.set(normalizeDataComponentId(dc.name), { id: dc.id, name: dc.name });
+    });
+
+    return (value: string): Set<string> => {
+      const out = new Set<string>();
+      const push = (raw?: string | null) => {
+        if (!raw) return;
+        const normalized = normalizeDataComponentId(raw);
+        if (normalized) out.add(normalized);
+      };
+
+      const trimmed = value.trim();
+      if (!trimmed) return out;
+      push(trimmed);
+
+      const dcIdMatch = trimmed.toUpperCase().match(/DC\d{4}/)?.[0];
+      if (dcIdMatch) {
+        push(dcIdMatch);
+        const staticDc = (dataComponents as Record<string, any>)[dcIdMatch];
+        if (staticDc?.name) push(staticDc.name);
+        const stixDc = stixById.get(normalizeDataComponentId(dcIdMatch));
+        if (stixDc) {
+          push(stixDc.id);
+          push(stixDc.name);
+        }
+      }
+
+      if (trimmed.includes(' - ')) {
+        const [prefix, ...rest] = trimmed.split(' - ');
+        const suffix = rest.join(' - ').trim();
+        if (prefix) push(prefix);
+        if (suffix) push(suffix);
+      }
+
+      const byName = dataComponentsByName.get(normalizeDataComponentId(trimmed)) || [];
+      byName.forEach((dc) => {
+        push(dc.id);
+        push(dc.name);
+      });
+
+      const stixByNameHit = stixByName.get(normalizeDataComponentId(trimmed));
+      if (stixByNameHit) {
+        push(stixByNameHit.id);
+        push(stixByNameHit.name);
+      }
+
+      return out;
+    };
+  }, [dataComponentsByName, ssmStixMapping?.dataComponents]);
 
   const getMutableElementsForCommunityAnalytic = (
     analytic: AnalyticItem,
@@ -1825,6 +2042,61 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const hasTechniqueFilter = selectedTechniqueFilter.size > 0;
   const hasDataComponentFilter = selectedDataComponentFilter.size > 0;
 
+  const mappedDataComponentsByTechnique = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    const add = (techniqueId: string, value: string) => {
+      const normalizedTechnique = normalizeTechniqueId(techniqueId);
+      if (!normalizedTechnique || !value) return;
+      const existing = map.get(normalizedTechnique) || new Set<string>();
+      expandDataComponentMatchKeys(value).forEach((key) => existing.add(key));
+      map.set(normalizedTechnique, existing);
+    };
+
+    Object.entries(ssmStixMapping?.techniqueDataComponents || {}).forEach(([techniqueId, refs]) => {
+      refs.forEach((ref) => {
+        if (ref.id) add(techniqueId, ref.id);
+        if (ref.name) add(techniqueId, ref.name);
+      });
+    });
+
+    ssmMetadataByTechnique.forEach((metadata, techniqueId) => {
+      extractMappedDataComponentsFromMetadata(metadata).forEach((value) => add(techniqueId, value));
+    });
+
+    return map;
+  }, [expandDataComponentMatchKeys, ssmMetadataByTechnique, ssmStixMapping?.techniqueDataComponents]);
+
+  const vendorSupportedDataComponentSet = useMemo(() => {
+    const set = new Set<string>();
+
+    (product.dataComponentIds || []).forEach((dcId) => {
+      expandDataComponentMatchKeys(dcId).forEach((key) => set.add(key));
+      const staticDc = (dataComponents as Record<string, any>)[dcId];
+      if (staticDc?.name) {
+        expandDataComponentMatchKeys(staticDc.name).forEach((key) => set.add(key));
+      }
+    });
+
+    ssmMetadataByTechnique.forEach((metadata) => {
+      extractMappedDataComponentsFromMetadata(metadata).forEach((value) => {
+        expandDataComponentMatchKeys(value).forEach((key) => set.add(key));
+      });
+    });
+
+    verifiedEvidence.forEach((entry) => {
+      if (entry.dataComponentId) {
+        expandDataComponentMatchKeys(entry.dataComponentId).forEach((key) => set.add(key));
+      }
+      if (entry.dataComponentName) {
+        expandDataComponentMatchKeys(entry.dataComponentName).forEach((key) => set.add(key));
+      }
+    });
+
+    return set;
+  }, [expandDataComponentMatchKeys, product.dataComponentIds, ssmMetadataByTechnique, verifiedEvidence]);
+
+  const hasVendorScopedAnalytics = vendorSupportedDataComponentSet.size > 0;
+
   const toggleTechniqueFilter = (id: string) => {
     const normalized = normalizeTechniqueId(id);
     setSelectedTechniqueIds((prev) => {
@@ -1920,7 +2192,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     // Build a complete technique candidate pool first so weak strategy links do not
     // exclude valid mapped techniques before scoring.
     stixTechniqueIds.forEach(addCandidateTechnique);
-    Object.keys(ssmCoverage).forEach(addCandidateTechnique);
+    Object.keys(ssmVisibilityCoverage).forEach(addCandidateTechnique);
     (coverageData?.coverage || []).forEach((row) => addCandidateTechnique(row.techniqueId));
     (visibilityCoverageData?.coverage || []).forEach((row) => addCandidateTechnique(row.techniqueId));
     autoMapping.enrichedMapping?.techniqueIds?.forEach(addCandidateTechnique);
@@ -1952,6 +2224,13 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     const maxAnalyticCount = Math.max(1, ...metricValues.map((metric) => metric.analyticCount));
     const maxDataComponents = Math.max(1, ...metricValues.map((metric) => metric.dataComponents.size));
 
+    // Build set of DC IDs with verified evidence for fidelity multiplier (Spec §6.3)
+    const verifiedDcIdSet = new Set<string>();
+    verifiedEvidence.forEach((entry) => {
+      verifiedDcIdSet.add(entry.dataComponentId.toLowerCase());
+      if (entry.dataComponentName) verifiedDcIdSet.add(entry.dataComponentName.toLowerCase());
+    });
+
     const excludedByReason: Record<ScenarioDropReason, string[]> = {
       blackBox: [],
       passThrough: [],
@@ -1962,61 +2241,51 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       .map(([techniqueId, metric]) => {
         const normalizedTechniqueId = normalizeTechniqueId(techniqueId);
         const tactic = resolveTacticName(normalizedTechniqueId);
-        let dropReason = getScenarioDropReason(normalizedTechniqueId, tactic, scenarioAnswers);
-        if (dropReason && scenarioOverrideTechniqueIds.has(normalizedTechniqueId)) {
-          dropReason = null;
+        let dropReasons = getScenarioDropReasons(normalizedTechniqueId, tactic, scenarioAnswers);
+        if (dropReasons.length > 0 && scenarioOverrideTechniqueIds.has(normalizedTechniqueId)) {
+          dropReasons = [];
         }
-        if (dropReason) {
-          excludedByReason[dropReason].push(techniqueId);
-        }
+        dropReasons.forEach((reason) => excludedByReason[reason].push(techniqueId));
 
         const strategyNorm = metric.strategyCount / maxStrategyCount;
         const analyticNorm = metric.analyticCount / maxAnalyticCount;
         const dcNorm = metric.dataComponents.size / maxDataComponents;
-        const baseScore = (0.4 * strategyNorm) + (0.3 * analyticNorm) + (0.3 * dcNorm);
-        const boostMultiplier = getScenarioBoostMultiplier(tactic, scenarioAnswers);
-        const finalScore = baseScore * boostMultiplier;
+        const rawBase = (0.4 * strategyNorm) + (0.3 * analyticNorm) + (0.3 * dcNorm);
+
+        // Mutable-field fidelity: 0.5–1.0 based on verified DC overlap (Spec §6.3)
+        let fidelity = 1.0;
+        if (metric.dataComponents.size > 0 && verifiedDcIdSet.size > 0) {
+          let verifiedCount = 0;
+          metric.dataComponents.forEach((dc) => { if (verifiedDcIdSet.has(dc)) verifiedCount++; });
+          fidelity = 0.5 + 0.5 * (verifiedCount / metric.dataComponents.size);
+        }
+
+        const baseScore = rawBase * fidelity;
+        const killWeight = getTacticWeight(tactic);
+        const dnaBoost = getScenarioBoostMultiplier(tactic, scenarioAnswers);
+        const finalScore = baseScore * killWeight * dnaBoost;
 
         return {
           techniqueId,
           tactic,
           baseScore,
-          boostMultiplier,
+          killWeight,
+          dnaBoost,
           finalScore,
-          dropped: dropReason,
+          dropped: dropReasons,
         };
       });
 
-    const priorityTechniqueIds = new Set<string>();
-    if (hasWizardGuidedCoverage) {
-      stixTechniqueIds.forEach((id) => priorityTechniqueIds.add(normalizeTechniqueId(id)));
-      (autoMapping.enrichedMapping?.techniqueIds || []).forEach((id) => priorityTechniqueIds.add(normalizeTechniqueId(id)));
-    }
-
     const ranked = [...scoredEntries]
-      .filter((entry) => (scenarioFilterEnabled ? !entry.dropped : true))
+      .filter((entry) => (scenarioFilterEnabled ? entry.dropped.length === 0 : true))
       .sort((a, b) => {
         if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
         return a.techniqueId.localeCompare(b.techniqueId);
       });
 
-    const rankedPriorityTechniqueIds = ranked
-      .map((entry) => entry.techniqueId)
-      .filter((techniqueId) => priorityTechniqueIds.has(techniqueId));
-    const rankedNonPriorityTechniqueIds = ranked
-      .map((entry) => entry.techniqueId)
-      .filter((techniqueId) => !priorityTechniqueIds.has(techniqueId));
-    const rankedTechniqueIds = [...rankedPriorityTechniqueIds, ...rankedNonPriorityTechniqueIds];
+    const rankedTechniqueIds = ranked.map((entry) => entry.techniqueId);
     const limitedTechniqueIds = scenarioFilterEnabled && !scenarioShowAll
-      ? (() => {
-          const limit = Math.max(1, scenarioMaxTechniques);
-          const seeded = rankedPriorityTechniqueIds.slice(0, limit);
-          for (const techniqueId of rankedNonPriorityTechniqueIds) {
-            if (seeded.length >= limit) break;
-            seeded.push(techniqueId);
-          }
-          return seeded;
-        })()
+      ? rankedTechniqueIds.slice(0, Math.max(1, scenarioMaxTechniques))
       : rankedTechniqueIds;
     const allowedSet = new Set<string>(scenarioFilterEnabled ? limitedTechniqueIds : rankedTechniqueIds);
     const rankByTechnique = new Map<string, number>();
@@ -2037,14 +2306,14 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     allPlatforms,
     autoMapping.enrichedMapping?.detectionStrategies,
     coverageData?.coverage,
-    hasWizardGuidedCoverage,
     resolveTacticName,
     scenarioAnswers,
     scenarioFilterEnabled,
+    verifiedEvidence,
     scenarioMaxTechniques,
     scenarioOverrideTechniqueIds,
     scenarioShowAll,
-    ssmCoverage,
+    ssmVisibilityCoverage,
     strategies,
     stixTechniqueIds,
     visibilityCoverageData?.coverage,
@@ -2056,11 +2325,35 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     humanSurface: scenarioTechniqueInsights.excludedByReason.humanSurface.length,
   }), [scenarioTechniqueInsights.excludedByReason]);
 
-  const totalScenarioExcluded = useMemo(() => (
-    scenarioExcludedCounts.blackBox
-    + scenarioExcludedCounts.passThrough
-    + scenarioExcludedCounts.humanSurface
-  ), [scenarioExcludedCounts.blackBox, scenarioExcludedCounts.humanSurface, scenarioExcludedCounts.passThrough]);
+  const totalScenarioExcluded = useMemo(() => {
+    const all = new Set<string>();
+    Object.values(scenarioTechniqueInsights.excludedByReason).forEach((list) =>
+      list.forEach((id) => all.add(id))
+    );
+    return all.size;
+  }, [scenarioTechniqueInsights.excludedByReason]);
+
+  // Tactic diversity warning (Spec §9.4)
+  const tacticDiversityWarning = useMemo(() => {
+    if (!scenarioFilterEnabled) return null;
+    const allowed = scenarioTechniqueInsights.allowedSet;
+    if (allowed.size < 3) return null;
+    const tacticCounts = new Map<string, number>();
+    scenarioTechniqueInsights.scoredEntries.forEach((entry) => {
+      if (!allowed.has(entry.techniqueId)) return;
+      const tactic = entry.tactic || 'Unknown';
+      tacticCounts.set(tactic, (tacticCounts.get(tactic) || 0) + 1);
+    });
+    let maxTactic = '';
+    let maxCount = 0;
+    tacticCounts.forEach((count, tactic) => {
+      if (count > maxCount) { maxCount = count; maxTactic = tactic; }
+    });
+    if (maxCount / allowed.size > 0.6) {
+      return `${Math.round(100 * maxCount / allowed.size)}% of visible techniques are in ${maxTactic}. Consider broadening tactic coverage.`;
+    }
+    return null;
+  }, [scenarioFilterEnabled, scenarioTechniqueInsights.allowedSet, scenarioTechniqueInsights.scoredEntries]);
 
   const updateScenarioAnswer = (key: ScenarioQuestionKey, checked: boolean) => {
     setScenarioAnswers((prev) => ({ ...prev, [key]: checked }));
@@ -2083,9 +2376,14 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     setScenarioOverrideTechniqueIds(new Set());
   };
 
-  const humanSurfaceExcludedTechniques = useMemo(() => {
-    return [...scenarioTechniqueInsights.excludedByReason.humanSurface].sort((a, b) => a.localeCompare(b));
-  }, [scenarioTechniqueInsights.excludedByReason.humanSurface]);
+  const excludedTechniquesByReason = useMemo(() => {
+    const result: Record<ScenarioDropReason, string[]> = {
+      blackBox: [...scenarioTechniqueInsights.excludedByReason.blackBox].sort((a, b) => a.localeCompare(b)),
+      passThrough: [...scenarioTechniqueInsights.excludedByReason.passThrough].sort((a, b) => a.localeCompare(b)),
+      humanSurface: [...scenarioTechniqueInsights.excludedByReason.humanSurface].sort((a, b) => a.localeCompare(b)),
+    };
+    return result;
+  }, [scenarioTechniqueInsights.excludedByReason]);
 
   const filteredVerifiedEvidence = useMemo(() => {
     if (!hasDataComponentFilter) return verifiedEvidence;
@@ -2111,37 +2409,73 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   };
 
   const filteredStrategies = useMemo(() => {
-    if (!scenarioFilterEnabled && !hasTechniqueFilter && !hasDataComponentFilter) return strategies;
+    if (!scenarioFilterEnabled && !hasTechniqueFilter && !hasDataComponentFilter && !hasVendorScopedAnalytics) {
+      return strategies;
+    }
     return strategies
       .map((strategy) => {
         const strategyTechniques = Array.isArray(strategy.techniques) ? strategy.techniques : [];
         const strategyAnalytics = Array.isArray(strategy.analytics) ? strategy.analytics : [];
+        const vendorScopedAnalytics = hasVendorScopedAnalytics
+          ? strategyAnalytics.filter((analytic) => (
+              Array.isArray(analytic.dataComponents)
+                && analytic.dataComponents.some((dcId) =>
+                  vendorSupportedDataComponentSet.has(normalizeDataComponentId(dcId))
+                )
+            ))
+          : strategyAnalytics;
         const scenarioTechniques = scenarioFilterEnabled
           ? strategyTechniques.filter((techId) => scenarioTechniqueInsights.allowedSet.has(normalizeTechniqueId(techId)))
           : strategyTechniques;
         const filteredTechniques = hasTechniqueFilter
           ? scenarioTechniques.filter((techId) => selectedTechniqueFilter.has(normalizeTechniqueId(techId)))
           : scenarioTechniques;
-        const filteredAnalytics = hasDataComponentFilter
-          ? strategyAnalytics.filter((analytic) =>
+        const selectedTechniqueDcSet = new Set<string>();
+        if (hasTechniqueFilter) {
+          filteredTechniques.forEach((techId) => {
+            const dcSet = mappedDataComponentsByTechnique.get(normalizeTechniqueId(techId));
+            if (!dcSet) return;
+            dcSet.forEach((dcId) => selectedTechniqueDcSet.add(dcId));
+          });
+        }
+
+        let filteredAnalytics = vendorScopedAnalytics;
+        if (hasTechniqueFilter) {
+          if (selectedTechniqueDcSet.size === 0) {
+            filteredAnalytics = [];
+          } else {
+            filteredAnalytics = filteredAnalytics.filter((analytic) => (
               Array.isArray(analytic.dataComponents)
-                && analytic.dataComponents.some((dcId) => selectedDataComponentFilter.has(normalizeDataComponentId(dcId)))
-            )
-          : strategyAnalytics;
+              && analytic.dataComponents.some((dcId) => selectedTechniqueDcSet.has(normalizeDataComponentId(dcId)))
+            ));
+          }
+        }
+        if (hasDataComponentFilter) {
+          filteredAnalytics = filteredAnalytics.filter((analytic) => (
+            Array.isArray(analytic.dataComponents)
+              && analytic.dataComponents.some((dcId) => selectedDataComponentFilter.has(normalizeDataComponentId(dcId)))
+          ));
+        }
         if (scenarioFilterEnabled && filteredTechniques.length === 0) return null;
         if (hasTechniqueFilter && filteredTechniques.length === 0) return null;
         if (hasDataComponentFilter && filteredAnalytics.length === 0) return null;
+        if (hasVendorScopedAnalytics && filteredAnalytics.length === 0) return null;
+        // Cross-dimensional: drop if both dimensions are empty after filtering
+        if (filteredTechniques.length === 0 && filteredAnalytics.length === 0) return null;
         return { ...strategy, techniques: filteredTechniques, analytics: filteredAnalytics };
       })
       .filter(Boolean) as DetectionStrategy[];
   }, [
     hasDataComponentFilter,
     hasTechniqueFilter,
+    hasVendorScopedAnalytics,
+    mappedDataComponentsByTechnique,
     scenarioFilterEnabled,
     scenarioTechniqueInsights.allowedSet,
     selectedDataComponentFilter,
     selectedTechniqueFilter,
     strategies,
+    vendorSupportedDataComponentSet,
   ]);
 
   const totalAnalytics = useMemo(() => {
@@ -2159,12 +2493,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
 
   const communitySources = useMemo(() => {
     const sources = new Set<ResourceType>();
-    (autoMapping.enrichedMapping?.communityAnalytics || []).forEach(ca => {
+    vendorMatchedCommunityAnalytics.forEach(ca => {
       const source = getCommunitySource(ca);
       if (source) sources.add(source);
     });
     return Array.from(sources);
-  }, [autoMapping.enrichedMapping?.communityAnalytics, getCommunitySource]);
+  }, [vendorMatchedCommunityAnalytics, getCommunitySource]);
 
   const availableSources = useMemo(() => {
     const sources = new Set<ResourceType>();
@@ -2244,8 +2578,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       .filter(([, status]) => status === 'partial' || status === 'significant')
       .forEach(([techId]) => fallbackIds.add(techId.toUpperCase()));
     
-    if (autoMapping.enrichedMapping?.techniqueIds) {
-      autoMapping.enrichedMapping.techniqueIds.forEach(id => fallbackIds.add(id.toUpperCase()));
+    if (autoMapping.enrichedMapping?.detectTechniqueIds) {
+      autoMapping.enrichedMapping.detectTechniqueIds.forEach(id => fallbackIds.add(id.toUpperCase()));
     }
 
     return Array.from(fallbackIds).map(id => ({
@@ -2256,7 +2590,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       usedByGroups: [],
       detectionStrategies: []
     })).sort((a, b) => a.id.localeCompare(b.id));
-  }, [coverageData?.coverage, ssmCoverage, autoMapping.enrichedMapping?.techniqueIds, getTechniqueName, resolveTacticName, resolveTechniqueDescription]);
+  }, [coverageData?.coverage, ssmCoverage, autoMapping.enrichedMapping?.detectTechniqueIds, getTechniqueName, resolveTacticName, resolveTechniqueDescription]);
 
   const visibilityTechniques = useMemo(() => {
     const coverageRows = visibilityCoverageData?.coverage || [];
@@ -2272,9 +2606,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     }
 
     const fallbackIds = new Set<string>();
-    Object.keys(ssmCoverage).forEach(id => fallbackIds.add(id.toUpperCase()));
-    if (autoMapping.enrichedMapping?.techniqueIds) {
-      autoMapping.enrichedMapping.techniqueIds.forEach(id => fallbackIds.add(id.toUpperCase()));
+    Object.keys(ssmVisibilityCoverage).forEach(id => fallbackIds.add(id.toUpperCase()));
+    if (autoMapping.enrichedMapping?.visibilityTechniqueIds) {
+      autoMapping.enrichedMapping.visibilityTechniqueIds.forEach(id => fallbackIds.add(id.toUpperCase()));
+    }
+    if (autoMapping.enrichedMapping?.detectTechniqueIds) {
+      autoMapping.enrichedMapping.detectTechniqueIds.forEach(id => fallbackIds.add(id.toUpperCase()));
     }
 
     return Array.from(fallbackIds).map(id => ({
@@ -2285,15 +2622,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       usedByGroups: [],
       detectionStrategies: []
     })).sort((a, b) => a.id.localeCompare(b.id));
-  }, [visibilityCoverageData?.coverage, ssmCoverage, autoMapping.enrichedMapping?.techniqueIds, getTechniqueName, getTechniqueTactic, resolveTechniqueDescription, resolveTacticName]);
+  }, [visibilityCoverageData?.coverage, ssmVisibilityCoverage, autoMapping.enrichedMapping?.visibilityTechniqueIds, autoMapping.enrichedMapping?.detectTechniqueIds, getTechniqueName, getTechniqueTactic, resolveTechniqueDescription, resolveTacticName]);
 
   const visibleTechniqueChips = useMemo(() => {
     let filtered = visibilityTechniques;
     if (scenarioFilterEnabled) {
       filtered = filtered.filter((tech) => scenarioTechniqueInsights.allowedSet.has(normalizeTechniqueId(tech.id)));
-    }
-    if (hasTechniqueFilter) {
-      filtered = filtered.filter((tech) => selectedTechniqueFilter.has(normalizeTechniqueId(tech.id)));
     }
     if (!scenarioFilterEnabled) {
       return filtered;
@@ -2307,11 +2641,9 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       return a.id.localeCompare(b.id);
     });
   }, [
-    hasTechniqueFilter,
     scenarioFilterEnabled,
     scenarioTechniqueInsights.allowedSet,
     scenarioTechniqueInsights.rankByTechnique,
-    selectedTechniqueFilter,
     visibilityTechniques,
   ]);
 
@@ -2366,25 +2698,36 @@ export function ProductView({ product, onBack }: ProductViewProps) {
 
   const filteredCommunityStrategies = useMemo(() => {
     if (!autoMapping.enrichedMapping?.detectionStrategies) return [];
-    const hasTechniqueSources = Object.keys(techniqueSources).length > 0;
+    const vendorMatchedTechniqueSet = new Set<string>();
+    vendorMatchedCommunityAnalytics.forEach((analytic) => {
+      (analytic.techniqueIds || []).forEach((techniqueId) => {
+        vendorMatchedTechniqueSet.add(normalizeTechniqueId(techniqueId));
+      });
+    });
+    if (vendorMatchedTechniqueSet.size === 0) return [];
 
     return autoMapping.enrichedMapping.detectionStrategies
       .map(strategy => {
-        const baseAnalytics = strategy.analytics.filter(a =>
+        const platformScopedAnalytics = strategy.analytics.filter(a =>
           platformMatchesAny(a.platforms, allPlatforms)
         );
-        const scenarioTechniques = scenarioFilterEnabled
+        const scenarioScopedTechniques = scenarioFilterEnabled
           ? strategy.techniques.filter((techId) => scenarioTechniqueInsights.allowedSet.has(normalizeTechniqueId(techId)))
           : strategy.techniques;
+        const productMatchedTechniques = scenarioScopedTechniques.filter((techId) =>
+          vendorMatchedTechniqueSet.has(normalizeTechniqueId(techId))
+        );
         const filteredTechniques = hasTechniqueFilter
-          ? scenarioTechniques.filter((techId) => selectedTechniqueFilter.has(normalizeTechniqueId(techId)))
-          : scenarioTechniques;
-        const filteredAnalytics = hasDataComponentFilter
-          ? baseAnalytics.filter((analytic) =>
-              Array.isArray(analytic.dataComponents)
-                && analytic.dataComponents.some((dcId) => selectedDataComponentFilter.has(normalizeDataComponentId(dcId)))
-            )
-          : baseAnalytics;
+          ? productMatchedTechniques.filter((techId) => selectedTechniqueFilter.has(normalizeTechniqueId(techId)))
+          : productMatchedTechniques;
+
+        let filteredAnalytics = platformScopedAnalytics;
+        if (hasDataComponentFilter) {
+          filteredAnalytics = filteredAnalytics.filter((analytic) => (
+            Array.isArray(analytic.dataComponents)
+              && analytic.dataComponents.some((dcId) => selectedDataComponentFilter.has(normalizeDataComponentId(dcId)))
+          ));
+        }
         return {
           ...strategy,
           techniques: filteredTechniques,
@@ -2395,10 +2738,15 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         if (scenarioFilterEnabled && s.techniques.length === 0) return false;
         if (hasTechniqueFilter && s.techniques.length === 0) return false;
         if (hasDataComponentFilter && s.analytics.length === 0) return false;
-        // Filter by source (e.g. Sigma, Splunk) if filters are active
-        if (!hasTechniqueSources) return true;
-        const strategySources = getSourcesForStrategy(s);
-        // If the strategy has no sources (shouldn't happen for auto-mapped items), keep it
+        const strategyCommunityAnalytics = vendorMatchedCommunityAnalytics.filter((analytic) =>
+          hasTechniqueOverlap(analytic.techniqueIds, s.techniques)
+        );
+        if (strategyCommunityAnalytics.length === 0) return false;
+        const strategySources = Array.from(new Set(
+          strategyCommunityAnalytics
+            .map((analytic) => getCommunitySource(analytic))
+            .filter((source): source is ResourceType => Boolean(source))
+        ));
         if (strategySources.length === 0) return true;
         return strategySources.some(src => sourceFilters.has(src));
       });
@@ -2406,14 +2754,15 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     autoMapping.enrichedMapping?.detectionStrategies,
     allPlatforms,
     sourceFilters,
-    techniqueSources,
-    getSourcesForStrategy,
+    getCommunitySource,
     hasTechniqueFilter,
     hasDataComponentFilter,
     scenarioFilterEnabled,
     scenarioTechniqueInsights.allowedSet,
     selectedTechniqueFilter,
     selectedDataComponentFilter,
+    hasTechniqueOverlap,
+    vendorMatchedCommunityAnalytics,
   ]);
 
   const tacticCandidateIds = useMemo(() => {
@@ -2513,6 +2862,16 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       (sum, s) => sum + s.analytics.length, 0
     );
   }, [filteredCommunityStrategies]);
+
+  const communityMappingSummary = useMemo(() => {
+    return vendorMatchedCommunityAnalytics.reduce((summary, analytic) => {
+      const kind = analytic.coverageKind || 'candidate';
+      if (kind === 'detect') summary.detect += 1;
+      else if (kind === 'visibility') summary.visibility += 1;
+      else summary.candidate += 1;
+      return summary;
+    }, { detect: 0, visibility: 0, candidate: 0 });
+  }, [vendorMatchedCommunityAnalytics]);
 
   const detectionCoverageScore = useMemo(() => {
     const totalTechniques = mitreStats?.techniques || techniques.length || 1;
@@ -2663,12 +3022,70 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     };
   }, [getTechniqueTactic, getTechniqueName, resolveTechniqueDescription]);
 
+  const scopeStrategiesToTechnique = useMemo(() => {
+    return <T extends {
+      id: string;
+      name: string;
+      description: string;
+      techniques: string[];
+      analytics: AnalyticItem[] | StixAnalytic[];
+    }>(
+      strategiesToScope: T[],
+      techniqueId?: string,
+      options?: { enforceDcScope?: boolean }
+    ): T[] => {
+      if (!techniqueId) return strategiesToScope;
+      const enforceDcScope = options?.enforceDcScope !== false;
+      const normalizedTechniqueId = normalizeTechniqueId(techniqueId);
+      const parentTechniqueId = normalizedTechniqueId.includes('.')
+        ? normalizedTechniqueId.split('.')[0]
+        : normalizedTechniqueId;
+
+      const mappedDcSet = mappedDataComponentsByTechnique.get(normalizedTechniqueId)
+        || mappedDataComponentsByTechnique.get(parentTechniqueId)
+        || new Set<string>();
+
+      return strategiesToScope
+        .map((strategy) => {
+          const scopedTechniques = (strategy.techniques || []).filter((techId) => {
+            const normalized = normalizeTechniqueId(techId);
+            if (normalized === normalizedTechniqueId) return true;
+            if (normalizedTechniqueId.includes('.') && normalized === parentTechniqueId) return true;
+            return false;
+          });
+          if (scopedTechniques.length === 0) return null;
+
+          let scopedAnalytics = Array.isArray(strategy.analytics) ? strategy.analytics : [];
+          if (enforceDcScope) {
+            if (mappedDcSet.size === 0) {
+              scopedAnalytics = [];
+            } else {
+              scopedAnalytics = scopedAnalytics.filter((analytic) => (
+                Array.isArray(analytic.dataComponents)
+                  && analytic.dataComponents.some((dcId) => mappedDcSet.has(normalizeDataComponentId(dcId)))
+              ));
+            }
+          }
+
+          return {
+            ...strategy,
+            techniques: scopedTechniques,
+            analytics: scopedAnalytics,
+          };
+        })
+        .filter(Boolean) as T[];
+    };
+  }, [mappedDataComponentsByTechnique]);
+
   const renderStrategyList = (
     strategiesToRender: Array<{ id: string; name: string; description: string; techniques: string[]; analytics: AnalyticItem[] | StixAnalytic[] }>,
-    sectionKey: string
-  ) => (
-    <div className="space-y-3">
-      {strategiesToRender.map((strategy) => {
+    sectionKey: string,
+    scopedTechniqueId?: string
+  ) => {
+    const scopedStrategies = scopeStrategiesToTechnique(strategiesToRender, scopedTechniqueId, { enforceDcScope: true });
+    return (
+      <div className="space-y-3">
+      {scopedStrategies.map((strategy) => {
         const strategyKey = `${sectionKey}-strategy-${strategy.id}`;
         const isStrategyExpanded = expandedStrategies.has(strategyKey);
         return (
@@ -2711,6 +3128,11 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                     {strategy.analytics.map((analytic) => {
                       const analyticKey = `${sectionKey}-analytic-${analytic.id}`;
                       const isAnalyticExpanded = expandedAnalytics.has(analyticKey);
+                      const analyticPlatforms = normalizePlatformList(
+                        Array.isArray((analytic as { platforms?: string[] }).platforms)
+                          ? ((analytic as { platforms?: string[] }).platforms || [])
+                          : []
+                      );
                       const strategyMetadata = getMetadataForTechniques(strategy.techniques);
                       const overrideLogSources = getLogSourcesFromMetadata(strategyMetadata);
                       const overrideMutableElements = getMutableElementsFromMetadata(strategyMetadata);
@@ -2765,6 +3187,20 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                 <code className="text-xs text-primary font-mono">{analytic.id}</code>
                                 <span className="font-medium text-foreground">{analytic.name}</span>
                               </div>
+                              {analyticPlatforms.length > 0 && (
+                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                  {analyticPlatforms.map((platformValue) => (
+                                    <Badge
+                                      key={`${analytic.id}-platform-${platformValue}`}
+                                      variant="outline"
+                                      className="text-[10px] flex items-center gap-1"
+                                    >
+                                      {getPlatformIcon(platformValue)}
+                                      <span>{getPlatformDisplayName(platformValue)}</span>
+                                    </Badge>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                           </button>
 
@@ -2933,20 +3369,28 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           </div>
         );
       })}
+      {scopedStrategies.length === 0 && (
+        <div className="text-sm text-muted-foreground">
+          No product-scoped analytics are mapped for this technique.
+        </div>
+      )}
     </div>
   );
+  };
 
   const renderCommunityStrategyList = (
     strategiesToRender: Array<{ id: string; name: string; description: string; techniques: string[]; analytics: AnalyticItem[] | StixAnalytic[] }>,
-    sectionKey: string
-  ) => (
-    <div className="space-y-3">
-      {strategiesToRender.map((strategy) => {
+    sectionKey: string,
+    scopedTechniqueId?: string
+  ) => {
+    const scopedStrategies = scopeStrategiesToTechnique(strategiesToRender, scopedTechniqueId, { enforceDcScope: false });
+    return (
+      <div className="space-y-3">
+      {scopedStrategies.map((strategy) => {
         const analytics = strategy.analytics as StixAnalytic[];
         const strategyKey = `${sectionKey}-strategy-${strategy.id}`;
         const isStrategyExpanded = expandedStrategies.has(strategyKey);
-        const stixDataComponents = autoMapping.enrichedMapping?.dataComponents || [];
-        const communityAnalytics = autoMapping.enrichedMapping?.communityAnalytics || [];
+        const communityAnalytics = vendorMatchedCommunityAnalytics;
         const visibleCommunityAnalytics = communityAnalytics.filter(ca =>
           hasTechniqueOverlap(ca.techniqueIds, strategy.techniques)
         );
@@ -3023,6 +3467,11 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                     {analytics.map((analytic) => {
                       const analyticKey = `${sectionKey}-analytic-${analytic.id}`;
                       const isAnalyticExpanded = expandedAnalytics.has(analyticKey);
+                      const analyticPlatforms = normalizePlatformList(
+                        Array.isArray((analytic as { platforms?: string[] }).platforms)
+                          ? ((analytic as { platforms?: string[] }).platforms || [])
+                          : []
+                      );
                       const uniqueLogSources = isStixAnalytic(analytic)
                         ? getLogSourcesForStixAnalytic(analytic)
                         : getLogSourcesForAnalytic(analytic as AnalyticItem);
@@ -3078,6 +3527,20 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                 <code className="text-xs text-primary font-mono">{analytic.id}</code>
                                 <span className="font-medium text-foreground">{analytic.name}</span>
                               </div>
+                              {analyticPlatforms.length > 0 && (
+                                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                                  {analyticPlatforms.map((platformValue) => (
+                                    <Badge
+                                      key={`${analytic.id}-community-platform-${platformValue}`}
+                                      variant="outline"
+                                      className="text-[10px] flex items-center gap-1"
+                                    >
+                                      {getPlatformIcon(platformValue)}
+                                      <span>{getPlatformDisplayName(platformValue)}</span>
+                                    </Badge>
+                                  ))}
+                                </div>
+                              )}
                             </div>
                             <div className="flex items-center gap-2">
                               {hasMitreEnrichment && (
@@ -3294,8 +3757,14 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           </div>
         );
       })}
+      {scopedStrategies.length === 0 && (
+        <div className="text-sm text-muted-foreground">
+          No product-scoped analytics are mapped for this technique.
+        </div>
+      )}
     </div>
   );
+  };
 
   const renderAttackTree = (
     attackTree: Array<{
@@ -3314,7 +3783,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       }>;
     }>,
     sectionKey: string,
-    renderStrategies: (strategies: Array<{ id: string; name: string; description: string; techniques: string[]; analytics: AnalyticItem[] | StixAnalytic[] }>, key: string) => JSX.Element
+    options: { enforceDcScope: boolean },
+    renderStrategies: (
+      strategies: Array<{ id: string; name: string; description: string; techniques: string[]; analytics: AnalyticItem[] | StixAnalytic[] }>,
+      key: string,
+      scopedTechniqueId?: string
+    ) => JSX.Element
   ) => {
     const getAnalyticsCount = (strategies: Array<{ analytics: AnalyticItem[] | StixAnalytic[] }>) =>
       strategies.reduce((sum, strategy) => sum + strategy.analytics.length, 0);
@@ -3333,8 +3807,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           ), 0);
           const tacticAnalyticsCount = tactic.techniques.reduce((sum, technique) => (
             sum
-            + getAnalyticsCount(technique.strategies)
-            + technique.subtechniques.reduce((subSum, sub) => subSum + getAnalyticsCount(sub.strategies), 0)
+            + getAnalyticsCount(scopeStrategiesToTechnique(technique.strategies, technique.id, options))
+            + technique.subtechniques.reduce((subSum, sub) => (
+              subSum + getAnalyticsCount(scopeStrategiesToTechnique(sub.strategies, sub.id, options))
+            ), 0)
           ), 0);
 
           return (
@@ -3377,10 +3853,15 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                       {tactic.techniques.map(technique => {
                       const techniqueKey = `${sectionKey}-tech-${technique.id}`;
                       const isTechniqueExpanded = expandedTechniques.has(techniqueKey);
-                      const techniqueStrategyCount = technique.strategies.length + technique.subtechniques.reduce((sum, sub) => sum + sub.strategies.length, 0);
+                      const scopedTechniqueStrategies = scopeStrategiesToTechnique(technique.strategies, technique.id, options);
+                      const scopedSubtechniques = technique.subtechniques.map((sub) => ({
+                        ...sub,
+                        scopedStrategies: scopeStrategiesToTechnique(sub.strategies, sub.id, options),
+                      }));
+                      const techniqueStrategyCount = scopedTechniqueStrategies.length + scopedSubtechniques.reduce((sum, sub) => sum + sub.scopedStrategies.length, 0);
                       const techniqueSubtechniqueCount = technique.subtechniques.length;
-                      const techniqueAnalyticsCount = getAnalyticsCount(technique.strategies)
-                        + technique.subtechniques.reduce((sum, sub) => sum + getAnalyticsCount(sub.strategies), 0);
+                      const techniqueAnalyticsCount = getAnalyticsCount(scopedTechniqueStrategies)
+                        + scopedSubtechniques.reduce((sum, sub) => sum + getAnalyticsCount(sub.scopedStrategies), 0);
 
                       return (
                         <div key={techniqueKey} className="rounded-md overflow-hidden bg-background">
@@ -3424,20 +3905,20 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                           {isTechniqueExpanded && (
                             <div>
                               <div className="px-5 py-4 bg-muted/10 space-y-4">
-                                {technique.strategies.length > 0 && (
+                                {scopedTechniqueStrategies.length > 0 && (
                                   <div className="space-y-3">
                                     <div className="text-xs uppercase text-muted-foreground tracking-wide">Detection Strategies</div>
-                                    {renderStrategies(technique.strategies, `${sectionKey}-${technique.id}`)}
+                                    {renderStrategies(technique.strategies, `${sectionKey}-${technique.id}`, technique.id)}
                                   </div>
                                 )}
 
                                 {technique.subtechniques.length > 0 && (
                                   <div className="space-y-3">
                                     <div className="text-xs uppercase text-muted-foreground tracking-wide">Sub-Techniques</div>
-                                    {technique.subtechniques.map(subtechnique => {
+                                    {scopedSubtechniques.map(subtechnique => {
                                       const subtechKey = `${sectionKey}-subtech-${subtechnique.id}`;
                                       const isSubtechExpanded = expandedSubtechniques.has(subtechKey);
-                                      const subtechAnalyticsCount = getAnalyticsCount(subtechnique.strategies);
+                                      const subtechAnalyticsCount = getAnalyticsCount(subtechnique.scopedStrategies);
 
                                       return (
                                         <div key={subtechKey} className="rounded-md overflow-hidden bg-card">
@@ -3464,7 +3945,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                             {!isSubtechExpanded && (
                                               <div className="flex items-center gap-2 flex-shrink-0">
                                                 <Badge variant="secondary" className="text-xs">
-                                                  {subtechnique.strategies.length} Strategies
+                                                  {subtechnique.scopedStrategies.length} Strategies
                                                 </Badge>
                                                 <Badge variant="secondary" className="text-xs">
                                                   {subtechAnalyticsCount} Analytics
@@ -3476,7 +3957,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                           {isSubtechExpanded && (
                                             <div>
                                               <div className="px-4 py-4 bg-muted/10">
-                                                {renderStrategies(subtechnique.strategies, `${sectionKey}-${subtechnique.id}`)}
+                                                {renderStrategies(subtechnique.strategies, `${sectionKey}-${subtechnique.id}`, subtechnique.id)}
                                               </div>
                                             </div>
                                           )}
@@ -3486,7 +3967,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                   </div>
                                 )}
 
-                                {technique.strategies.length === 0 && technique.subtechniques.length === 0 && (
+                                {scopedTechniqueStrategies.length === 0 && scopedSubtechniques.length === 0 && (
                                   <div className="text-sm text-muted-foreground">
                                     No detection strategies mapped for this technique.
                                   </div>
@@ -3512,40 +3993,81 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const communityAttackTree = useMemo(() => buildAttackTree(filteredCommunityStrategies), [filteredCommunityStrategies, buildAttackTree]);
 
   const mappedDataComponents = useMemo(() => {
-    // Start with static data components
-    const staticDCs = product.dataComponentIds
-      .map(id => (dataComponents as Record<string, any>)[id])
-      .filter(Boolean);
+    const byId = new Map<string, any>();
+    const staticDataComponents = dataComponents as Record<string, any>;
 
-    // Add dynamic data components from auto-mapping
-    const dynamicDCs = autoMapping.enrichedMapping?.dataComponents || [];
+    const addByObject = (dc: any) => {
+      if (!dc?.id) return;
+      const key = normalizeDataComponentId(dc.id);
+      if (byId.has(key)) return;
+      byId.set(key, {
+        id: dc.id,
+        name: dc.name || dc.id,
+        dataSource: dc.dataSource || 'Mapped data component',
+        description: dc.description || 'Mapped data component',
+        mutableElements: Array.isArray(dc.mutableElements) ? dc.mutableElements : [],
+        platforms: Array.isArray(dc.platforms) ? dc.platforms : [],
+        logSources: Array.isArray(dc.logSources) ? dc.logSources : [],
+      });
+    };
 
-    // Combine and deduplicate by ID
-    const combined = [...staticDCs];
-
-    dynamicDCs.forEach(dc => {
-      // Skip if already present by ID
-      if (combined.some(existing => existing.id === dc.id)) return;
-
-      // Check if we have static metadata for this ID (now that IDs match)
-      const staticMeta = (dataComponents as Record<string, any>)[dc.id];
-      
-      if (staticMeta) {
-        combined.push(staticMeta);
-      } else {
-        // Fallback to dynamic DC data
-        combined.push({
-          id: dc.id,
-          name: dc.name,
-          dataSource: dc.dataSource,
-          description: 'Dynamically mapped data component',
-          mutableElements: [],
-          platforms: []
-        });
-      }
+    const stixDataComponents = ssmStixMapping?.dataComponents || [];
+    const stixById = new Map<string, { id: string; name: string; dataSource: string }>();
+    const stixByName = new Map<string, { id: string; name: string; dataSource: string }>();
+    stixDataComponents.forEach((dc) => {
+      stixById.set(normalizeDataComponentId(dc.id), dc);
+      stixByName.set(normalizeDataComponentId(dc.name), dc);
     });
-    return combined;
-  }, [product.dataComponentIds, autoMapping.enrichedMapping?.dataComponents]);
+
+    const addByIdOrName = (value: string) => {
+      if (!value) return;
+      const normalizedValue = normalizeDataComponentId(value);
+      const dcIdMatch = value.toUpperCase().match(/DC\d{4}/)?.[0];
+      if (dcIdMatch) {
+        const staticDc = staticDataComponents[dcIdMatch];
+        if (staticDc) {
+          addByObject(staticDc);
+          return;
+        }
+        const stixDc = stixById.get(normalizeDataComponentId(dcIdMatch));
+        if (stixDc) {
+          addByObject(stixDc);
+          return;
+        }
+        addByObject({
+          id: dcIdMatch,
+          name: dcIdMatch,
+          dataSource: 'Mapped data component',
+          description: 'Mapped data component',
+          mutableElements: [],
+          platforms: [],
+          logSources: [],
+        });
+        return;
+      }
+
+      const byNameCandidates = dataComponentsByName.get(normalizedValue) || [];
+      if (byNameCandidates.length > 0) {
+        byNameCandidates.forEach((candidate) => addByObject(candidate));
+        return;
+      }
+
+      const stixDcByName = stixByName.get(normalizedValue);
+      if (stixDcByName) {
+        addByObject(stixDcByName);
+      }
+    };
+
+    (product.dataComponentIds || []).forEach((dcId) => addByIdOrName(dcId));
+    vendorSupportedDataComponentSet.forEach((value) => addByIdOrName(value));
+
+    return Array.from(byId.values()).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }, [
+    dataComponentsByName,
+    product.dataComponentIds,
+    ssmStixMapping?.dataComponents,
+    vendorSupportedDataComponentSet,
+  ]);
 
   const visibleMappedDataComponents = useMemo(() => {
     if (!hasDataComponentFilter) return mappedDataComponents;
@@ -3602,6 +4124,17 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           manualOverrides: Array.from(scenarioOverrideTechniqueIds),
           excludedCounts: scenarioExcludedCounts,
           totalExcluded: totalScenarioExcluded,
+          techniqueScores: scenarioFilterEnabled
+            ? scenarioTechniqueInsights.scoredEntries.map((entry) => ({
+                techniqueId: entry.techniqueId,
+                tactic: entry.tactic,
+                base: +entry.baseScore.toFixed(4),
+                killWeight: +entry.killWeight.toFixed(2),
+                dnaBoost: +entry.dnaBoost.toFixed(2),
+                final: +entry.finalScore.toFixed(4),
+                dropped: entry.dropped,
+              }))
+            : [],
         },
       },
       overview: {
@@ -3676,6 +4209,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     scenarioMaxTechniques,
     scenarioOverrideTechniqueIds,
     scenarioShowAll,
+    scenarioTechniqueInsights.scoredEntries,
     selectedDataComponentFilter,
     selectedTechniqueFilter,
     sourceFilters,
@@ -3709,7 +4243,26 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       lines.push(`- Scenario max techniques: ${scenarioShowAll ? 'All ranked' : scenarioMaxTechniques}`);
       lines.push(`- Scenario answers: ${Object.entries(scenarioAnswers).map(([key, value]) => `${SCENARIO_QUESTION_LABELS[key as ScenarioQuestionKey]}=${value ? 'Yes' : 'No'}`).join(', ')}`);
       lines.push(`- Scenario manual overrides: ${scenarioOverrideTechniqueIds.size > 0 ? Array.from(scenarioOverrideTechniqueIds).join(', ') : 'None'}`);
-      lines.push(`- Scenario exclusions: ${totalScenarioExcluded} (Black Box ${scenarioExcludedCounts.blackBox}, Pass-Through ${scenarioExcludedCounts.passThrough}, Human Surface ${scenarioExcludedCounts.humanSurface})`);
+      lines.push(`- Scenario exclusions: ${totalScenarioExcluded} unique (Black Box ${scenarioExcludedCounts.blackBox}, Pass-Through ${scenarioExcludedCounts.passThrough}, Human Surface ${scenarioExcludedCounts.humanSurface})`);
+      if (scenarioTechniqueInsights.scoredEntries.length > 0) {
+        lines.push('');
+        lines.push('### Technique Scores');
+        lines.push('');
+        lines.push(
+          toMarkdownTable(
+            ['Technique', 'Tactic', 'Base', 'Kill Weight', 'DNA Boost', 'Final', 'Status'],
+            scenarioTechniqueInsights.scoredEntries.map((entry) => [
+              entry.techniqueId,
+              entry.tactic || 'Unknown',
+              entry.baseScore.toFixed(3),
+              entry.killWeight.toFixed(2),
+              `x${entry.dnaBoost.toFixed(2)}`,
+              entry.finalScore.toFixed(3),
+              entry.dropped.length > 0 ? `Dropped (${entry.dropped.join(', ')})` : 'Included',
+            ])
+          )
+        );
+      }
     }
     lines.push('');
     lines.push('## Overview');
@@ -3808,6 +4361,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     scenarioMaxTechniques,
     scenarioOverrideTechniqueIds,
     scenarioShowAll,
+    scenarioTechniqueInsights.scoredEntries,
     selectedDataComponentFilter,
     selectedTechniqueFilter,
     sourceFilters,
@@ -4022,6 +4576,23 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                   </div>
                 </div>
                 <p className="text-lg text-muted-foreground">{product.description}</p>
+                <div className="pt-1">
+                  <div className="text-xs uppercase tracking-wide text-muted-foreground">Mapped Platforms</div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {mappedPlatforms.length > 0 ? (
+                      mappedPlatforms.map((platformValue) => (
+                        <Badge key={`platform-${platformValue}`} variant="outline" className="text-xs flex items-center gap-1.5">
+                          {getPlatformIcon(platformValue)}
+                          <span>{getPlatformDisplayName(platformValue)}</span>
+                        </Badge>
+                      ))
+                    ) : (
+                      <span className="text-xs text-muted-foreground">
+                        No mapping platform scope recorded yet.
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
             
@@ -4187,14 +4758,19 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                         Excluded {totalScenarioExcluded} (Black Box {scenarioExcludedCounts.blackBox}, Pass-Through {scenarioExcludedCounts.passThrough}, Human Surface {scenarioExcludedCounts.humanSurface})
                       </Badge>
                     )}
+                    {tacticDiversityWarning && (
+                      <Badge variant="outline" className="text-xs text-yellow-500 border-yellow-500/40">
+                        {tacticDiversityWarning}
+                      </Badge>
+                    )}
                   </div>
                 )}
 
-                {scenarioFilterEnabled && !scenarioAnswers.humanSurface && (
-                  <div className="mt-4 rounded-md border border-border/60 bg-background/60 p-3">
+                {scenarioFilterEnabled && totalScenarioExcluded > 0 && (
+                  <div className="mt-4 rounded-md border border-border/60 bg-background/60 p-3 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="text-xs font-medium text-foreground">
-                        Excluded by Human Surface = No ({humanSurfaceExcludedTechniques.length})
+                        Excluded Techniques ({totalScenarioExcluded})
                       </div>
                       {scenarioOverrideTechniqueIds.size > 0 && (
                         <Button
@@ -4204,42 +4780,46 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                           onClick={clearScenarioOverrides}
                           className="h-7 text-xs"
                         >
-                          Clear Overrides
+                          Clear Overrides ({scenarioOverrideTechniqueIds.size})
                         </Button>
                       )}
                     </div>
 
-                    {humanSurfaceExcludedTechniques.length > 0 ? (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {humanSurfaceExcludedTechniques.map((techId) => {
-                          const isOverridden = scenarioOverrideTechniqueIds.has(normalizeTechniqueId(techId));
-                          return (
-                            <button
-                              key={`override-${techId}`}
-                              type="button"
-                              onClick={() => toggleScenarioOverrideTechnique(techId)}
-                              className={cn(
-                                "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
-                                isOverridden
-                                  ? "border-primary/60 bg-primary/10 text-foreground"
-                                  : "border-border bg-muted/30 text-muted-foreground hover:text-foreground hover:border-primary/40"
-                              )}
-                              data-testid={`button-scenario-override-${techId}`}
-                            >
-                              <code className="font-mono text-[10px] text-red-600">{techId}</code>
-                              <span>{getTechniqueName(techId)}</span>
-                              <span className="text-[10px]">
-                                {isOverridden ? 'Remove Override' : 'Add Back'}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        No techniques currently excluded by the human-surface denylist.
-                      </p>
-                    )}
+                    {(Object.entries(excludedTechniquesByReason) as [ScenarioDropReason, string[]][]).map(([reason, techIds]) => {
+                      if (techIds.length === 0) return null;
+                      return (
+                        <div key={reason}>
+                          <div className="text-xs text-muted-foreground mb-1.5">
+                            {SCENARIO_QUESTION_LABELS[reason]} ({techIds.length})
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {techIds.map((techId) => {
+                              const isOverridden = scenarioOverrideTechniqueIds.has(normalizeTechniqueId(techId));
+                              return (
+                                <button
+                                  key={`override-${reason}-${techId}`}
+                                  type="button"
+                                  onClick={() => toggleScenarioOverrideTechnique(techId)}
+                                  className={cn(
+                                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
+                                    isOverridden
+                                      ? "border-primary/60 bg-primary/10 text-foreground"
+                                      : "border-border bg-muted/30 text-muted-foreground hover:text-foreground hover:border-primary/40"
+                                  )}
+                                  data-testid={`button-scenario-override-${techId}`}
+                                >
+                                  <code className="font-mono text-[10px] text-red-600">{techId}</code>
+                                  <span>{getTechniqueName(techId)}</span>
+                                  <span className="text-[10px]">
+                                    {isOverridden ? 'Remove' : 'Add Back'}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
 
@@ -4255,7 +4835,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                             <th className="px-2 py-2 text-left font-medium text-muted-foreground">Technique</th>
                             <th className="px-2 py-2 text-left font-medium text-muted-foreground">Tactic</th>
                             <th className="px-2 py-2 text-left font-medium text-muted-foreground">Base</th>
-                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Boost</th>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">Kill Wt</th>
+                            <th className="px-2 py-2 text-left font-medium text-muted-foreground">DNA Boost</th>
                             <th className="px-2 py-2 text-left font-medium text-muted-foreground">Final</th>
                             <th className="px-2 py-2 text-left font-medium text-muted-foreground">Status</th>
                           </tr>
@@ -4268,16 +4849,17 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                               </td>
                               <td className="px-2 py-2 text-foreground">{entry.tactic || 'Unknown'}</td>
                               <td className="px-2 py-2 text-foreground">{entry.baseScore.toFixed(3)}</td>
-                              <td className="px-2 py-2 text-foreground">x{entry.boostMultiplier.toFixed(2)}</td>
+                              <td className="px-2 py-2 text-foreground">{entry.killWeight.toFixed(2)}</td>
+                              <td className="px-2 py-2 text-foreground">x{entry.dnaBoost.toFixed(2)}</td>
                               <td className="px-2 py-2 text-foreground">{entry.finalScore.toFixed(3)}</td>
                               <td className="px-2 py-2 text-muted-foreground">
-                                {entry.dropped ? `Dropped (${entry.dropped})` : 'Included'}
+                                {entry.dropped.length > 0 ? `Dropped (${entry.dropped.join(', ')})` : 'Included'}
                               </td>
                             </tr>
                           ))}
                           {scenarioTechniqueInsights.scoredEntries.length === 0 && (
                             <tr>
-                              <td colSpan={6} className="px-2 py-3 text-center text-muted-foreground">
+                              <td colSpan={7} className="px-2 py-3 text-center text-muted-foreground">
                                 No technique scoring data available.
                               </td>
                             </tr>
@@ -4460,71 +5042,92 @@ export function ProductView({ product, onBack }: ProductViewProps) {
             <section className="mt-6" id="verified-evidence">
               <div className="p-4 rounded-lg bg-card">
                 <div className="flex items-center justify-between mb-3">
-                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <Shield className="w-4 h-4 text-primary" />
-                    Vendor Log Sources
-                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setIsVendorLogSourcesExpanded((prev) => !prev)}
+                    className="w-full flex items-center justify-between text-left rounded-md border border-border/60 bg-background/60 px-3 py-2 hover:bg-muted/30 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Shield className="w-4 h-4 text-primary" />
+                      <span className="text-sm font-semibold text-foreground">Vendor Log Sources</span>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-muted-foreground">
+                        {filteredVerifiedEvidence.length} data component{filteredVerifiedEvidence.length === 1 ? '' : 's'}
+                      </span>
+                      <ChevronRight
+                        className={cn(
+                          "w-4 h-4 text-muted-foreground transition-transform",
+                          isVendorLogSourcesExpanded && "rotate-90"
+                        )}
+                      />
+                    </div>
+                  </button>
                 </div>
-                <p className="text-sm text-muted-foreground mb-3">
-                  Product-specific log sources captured from research or manual mapping.
-                </p>
-                {filteredVerifiedEvidence.length > 0 ? (
-                  <div className="space-y-4">
-                    {filteredVerifiedEvidence.map((entry) => {
-                      return (
-                        <div key={entry.dataComponentId} className="rounded-lg bg-background/50 p-3 space-y-3">
-                          <div className="flex items-center justify-between">
-                            <div className="text-sm font-semibold text-foreground">
-                              {entry.dataComponentId} - {entry.dataComponentName}
+                {isVendorLogSourcesExpanded && (
+                  <>
+                    <p className="text-sm text-muted-foreground mb-3">
+                      Product-specific log sources captured from research or manual mapping.
+                    </p>
+                    {filteredVerifiedEvidence.length > 0 ? (
+                      <div className="space-y-4">
+                        {filteredVerifiedEvidence.map((entry) => {
+                          return (
+                            <div key={entry.dataComponentId} className="rounded-lg bg-background/50 p-3 space-y-3">
+                              <div className="flex items-center justify-between">
+                                <div className="text-sm font-semibold text-foreground">
+                                  {entry.dataComponentId} - {entry.dataComponentName}
+                                </div>
+                              </div>
+                              <div className="rounded-md overflow-hidden border border-border keep-border">
+                                <table className="w-full text-xs">
+                                  <thead className="bg-muted/50">
+                                    <tr>
+                                      <th className="text-left px-3 py-2 font-medium text-muted-foreground">Log Source</th>
+                                      <th className="text-left px-3 py-2 font-medium text-muted-foreground">Channel</th>
+                                      <th className="text-left px-3 py-2 font-medium text-muted-foreground">Notes</th>
+                                      <th className="text-left px-3 py-2 font-medium text-muted-foreground">Source</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-border">
+                                    {entry.logSources.map((source, idx) => (
+                                      <tr key={`${entry.dataComponentId}-${idx}`}>
+                                        <td className="px-3 py-2 font-mono text-foreground">{source.name}</td>
+                                        <td className="px-3 py-2 font-mono text-muted-foreground">{formatChannel(source.channel)}</td>
+                                        <td className="px-3 py-2 text-muted-foreground">
+                                          {source.notes ? source.notes : '-'}
+                                        </td>
+                                        <td className="px-3 py-2">
+                                          {source.sourceUrl ? (
+                                            <a
+                                              href={source.sourceUrl}
+                                              target="_blank"
+                                              rel="noreferrer"
+                                              className="inline-flex items-center rounded-md border border-border/60 bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
+                                            >
+                                              Reference
+                                            </a>
+                                          ) : (
+                                            <span className="text-muted-foreground">-</span>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
-                          </div>
-                          <div className="rounded-md overflow-hidden border border-border keep-border">
-                            <table className="w-full text-xs">
-                              <thead className="bg-muted/50">
-                                <tr>
-                                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">Log Source</th>
-                                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">Channel</th>
-                                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">Notes</th>
-                                  <th className="text-left px-3 py-2 font-medium text-muted-foreground">Source</th>
-                                </tr>
-                              </thead>
-                              <tbody className="divide-y divide-border">
-                                {entry.logSources.map((source, idx) => (
-                                  <tr key={`${entry.dataComponentId}-${idx}`}>
-                                    <td className="px-3 py-2 font-mono text-foreground">{source.name}</td>
-                                    <td className="px-3 py-2 font-mono text-muted-foreground">{formatChannel(source.channel)}</td>
-                                    <td className="px-3 py-2 text-muted-foreground">
-                                      {source.notes ? source.notes : '-'}
-                                    </td>
-                                    <td className="px-3 py-2">
-                                      {source.sourceUrl ? (
-                                        <a
-                                          href={source.sourceUrl}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="inline-flex items-center rounded-md border border-border/60 bg-background px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-muted"
-                                        >
-                                          Reference
-                                        </a>
-                                      ) : (
-                                        <span className="text-muted-foreground">-</span>
-                                      )}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="text-sm text-muted-foreground rounded-lg p-4 text-center">
-                    {hasDataComponentFilter
-                      ? 'No vendor log sources for the selected data components.'
-                      : 'No vendor log sources saved yet.'}
-                  </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="text-sm text-muted-foreground rounded-lg p-4 text-center">
+                        {hasDataComponentFilter
+                          ? 'No vendor log sources for the selected data components.'
+                          : 'No vendor log sources saved yet.'}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </section>
@@ -4541,7 +5144,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
             </p>
 
             {ctidAttackTree.length > 0 ? (
-              renderAttackTree(ctidAttackTree, 'ctid', renderStrategyList)
+              renderAttackTree(ctidAttackTree, 'ctid', { enforceDcScope: true }, renderStrategyList)
             ) : (
               <div className="py-12 text-center text-muted-foreground rounded-lg">
                 No STIX mappings found for {product.productName}.
@@ -4614,6 +5217,25 @@ export function ProductView({ product, onBack }: ProductViewProps) {
               Detection strategies derived from techniques discovered in community detection rules (Sigma, Elastic, Splunk, Azure).
             </p>
 
+            {!autoMapping.isLoading && autoMapping.enrichedMapping && (
+              <div className="mb-6 flex flex-wrap gap-2">
+                <Badge variant="secondary" className="border border-emerald-500/20 bg-emerald-500/10 text-emerald-700">
+                  {communityMappingSummary.detect} Confirmed
+                </Badge>
+                <Badge variant="secondary" className="border border-sky-500/20 bg-sky-500/10 text-sky-700">
+                  {communityMappingSummary.visibility} Visibility
+                </Badge>
+                <Badge variant="secondary" className="border border-amber-500/20 bg-amber-500/10 text-amber-700">
+                  {communityMappingSummary.candidate} Candidates
+                </Badge>
+                {autoMapping.data?.status === 'partial' && (
+                  <Badge variant="secondary" className="border border-amber-500/20 bg-amber-500/10 text-amber-700">
+                    Partial Auto-Mapping
+                  </Badge>
+                )}
+              </div>
+            )}
+
             {autoMapping.isLoading && (
               <div className="py-8 text-center rounded-lg">
                 <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2 text-primary" />
@@ -4623,26 +5245,26 @@ export function ProductView({ product, onBack }: ProductViewProps) {
 
             {filteredCommunityStrategies.length > 0 && (
               <ErrorBoundary>
-                {renderAttackTree(communityAttackTree, 'community', renderCommunityStrategyList)}
+                {renderAttackTree(communityAttackTree, 'community', { enforceDcScope: false }, renderCommunityStrategyList)}
               </ErrorBoundary>
             )}
 
-            {autoMapping.data?.status === 'matched' && !autoMapping.isLoading && autoMapping.enrichedMapping && filteredCommunityStrategies.length === 0 && autoMapping.enrichedMapping.techniqueIds.length === 0 && (
+            {(autoMapping.data?.status === 'matched' || autoMapping.data?.status === 'partial') && !autoMapping.isLoading && autoMapping.enrichedMapping && filteredCommunityStrategies.length === 0 && autoMapping.enrichedMapping.techniqueIds.length === 0 && (
               <div className="py-8 text-center rounded-lg">
                 <p className="text-muted-foreground">Found community references, but no MITRE ATT&CK technique IDs could be extracted from the detection rules.</p>
               </div>
             )}
 
-            {autoMapping.data?.status === 'matched' && !autoMapping.isLoading && autoMapping.enrichedMapping && filteredCommunityStrategies.length === 0 && autoMapping.enrichedMapping.techniqueIds.length > 0 && (
+            {(autoMapping.data?.status === 'matched' || autoMapping.data?.status === 'partial') && !autoMapping.isLoading && autoMapping.enrichedMapping && filteredCommunityStrategies.length === 0 && autoMapping.enrichedMapping.techniqueIds.length > 0 && (
               <div className="p-4 rounded-lg bg-card">
                 <div className="flex items-start gap-3">
                   <Info className="w-5 h-5 text-muted-foreground flex-shrink-0 mt-0.5" />
                   <div>
                     <p className="text-sm text-muted-foreground mb-3">
-                      Found <strong className="text-foreground">{autoMapping.enrichedMapping.techniqueIds.length}</strong> technique references from {RESOURCE_LABELS[autoMapping.enrichedMapping.source]?.label}, but these techniques don't have detection strategies defined in the MITRE ATT&CK STIX v18 knowledge base. Not all ATT&CK techniques have corresponding detection strategies.
+                      Found <strong className="text-foreground">{autoMapping.enrichedMapping.techniqueIds.length}</strong> technique references from {RESOURCE_LABELS[autoMapping.enrichedMapping.source]?.label}, but these techniques either lack detection strategies in the MITRE ATT&CK STIX v18 knowledge base or remain visibility-only evidence.
                     </p>
                     <p className="text-xs text-muted-foreground mb-3">
-                      The community detection rules still provide value - they show this product is referenced in active threat detection content.
+                      Confirmed mappings indicate stronger ATT&CK detection coverage. Visibility mappings show telemetry support that still needs corroboration or promotion.
                     </p>
                     <div className="flex flex-wrap gap-2">
                       {autoMapping.enrichedMapping.techniqueIds.slice(0, 10).map(techId => (
@@ -4671,6 +5293,15 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                 <p className="text-amber-600 font-medium">No Automated Mappings Found</p>
                 <p className="text-sm text-muted-foreground mt-1">
                   This product requires AI-assisted mapping to determine detection coverage.
+                </p>
+              </div>
+            )}
+
+            {autoMapping.data?.status === 'partial' && (
+              <div className="py-6 px-4 rounded-lg bg-sky-500/5 border border-sky-500/10">
+                <p className="text-sky-700 font-medium">Visibility Evidence Found</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Community sources found telemetry or inferred ATT&CK relationships for this product, but not enough confirmed evidence to publish full detection coverage.
                 </p>
               </div>
             )}

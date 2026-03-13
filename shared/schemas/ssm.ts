@@ -2,9 +2,12 @@ import { z } from "zod";
 import { PLATFORM_VALUES } from "../platforms";
 
 // The Rubric Enums (Strictly enforced)
-export const SsmCategoryEnum = z.enum(["Protect", "Detect", "Respond"]);
+export const SsmCategoryEnum = z.enum(["Protect", "Detect", "Respond", "Observe"]);
 export const SsmScoreValueEnum = z.enum(["Minimal", "Partial", "Significant"]);
 export const SsmPlatformEnum = z.enum(PLATFORM_VALUES);
+export const SsmCoverageKindEnum = z.enum(["detect", "visibility", "candidate"]);
+export const SsmEvidenceTierEnum = z.enum(["strong", "medium", "weak"]);
+export const SsmValidationStatusEnum = z.enum(["pending", "valid", "invalid", "uncertain"]);
 
 // 1. The Mapping (Child)
 export const SsmMappingSchema = z.object({
@@ -12,6 +15,11 @@ export const SsmMappingSchema = z.object({
   techniqueId: z.string(),
   techniqueName: z.string(),
   mappingType: SsmCategoryEnum,
+  coverageKind: SsmCoverageKindEnum.default("detect"),
+  evidenceTier: SsmEvidenceTierEnum.default("medium"),
+  mappingMethod: z.string().optional().nullable(),
+  validationStatus: SsmValidationStatusEnum.optional().nullable(),
+  aiConfidence: z.number().int().optional().nullable(),
   scoreCategory: SsmScoreValueEnum,
   scoreValue: z.string().optional(),
   comments: z.string().optional(),

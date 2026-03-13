@@ -24,6 +24,7 @@ function Router() {
     <Switch>
       <Route path="/" component={Dashboard} />
       <Route path="/ai-mapper" component={AIMapper} />
+      <Route path="/products/:productId" component={Products} />
       <Route path="/products" component={Products} />
       <Route path="/data-components" component={DataComponents} />
       <Route path="/detection-strategies" component={DetectionStrategies} />

@@ -469,7 +469,53 @@ export async function registerRoutes(
         }
       });
 
-      const techniqueById = new Map<string, { technique: { id: string; name: string; platforms: string[] }; dataComponents: Set<string> }>();
+      const normalizeDcKey = (value: string): string =>
+        value
+          .toLowerCase()
+          .replace(/\s+/g, " ")
+          .trim();
+
+      const extractDcNameVariants = (value: string): string[] => {
+        const trimmed = value.trim();
+        if (!trimmed) return [];
+        const variants = new Set<string>([trimmed]);
+        if (trimmed.includes(":")) {
+          const right = trimmed.split(":").slice(1).join(":").trim();
+          if (right) variants.add(right);
+        }
+        return Array.from(variants);
+      };
+
+      const selectedDcByKey = new Map<string, string>();
+      resolvedComponents.forEach((dc) => {
+        const nameKey = normalizeDcKey(dc.name);
+        if (nameKey && !selectedDcByKey.has(nameKey)) {
+          selectedDcByKey.set(nameKey, dc.name);
+        }
+        const idKey = normalizeDcKey(dc.id);
+        if (idKey && !selectedDcByKey.has(idKey)) {
+          selectedDcByKey.set(idKey, dc.name);
+        }
+      });
+
+      type TechniqueAssessmentStatus = "confirmed" | "candidate";
+      type TechniqueScoreCategory = "Significant" | "Partial" | "Minimal";
+      interface TechniqueAssessment {
+        techniqueId: string;
+        techniqueName: string;
+        status: TechniqueAssessmentStatus;
+        scoreCategory: TechniqueScoreCategory;
+        scoreValue: string;
+        mappedDataComponents: string[];
+        requiredDataComponents: string[];
+        matchedRequiredDataComponents: string[];
+        requirementCoverageRatio: number;
+      }
+
+      const techniqueById = new Map<string, {
+        technique: { id: string; name: string; platforms: string[] };
+        dataComponents: Set<string>;
+      }>();
       resolvedComponents.forEach((dc) => {
         const inferred = mitreKnowledgeGraph.getTechniquesByDataComponentName(dc.name);
         inferred.forEach((tech) => {
@@ -487,13 +533,88 @@ export async function registerRoutes(
         });
       });
 
-      const techniquesByPlatform = new Map<string, Array<{ id: string; name: string; dataComponents: Set<string> }>>();
+      const assessTechnique = (
+        techniqueId: string,
+        techniqueName: string,
+        mappedDataComponents: Set<string>
+      ): TechniqueAssessment => {
+        const mappedList = Array.from(mappedDataComponents).sort((a, b) => a.localeCompare(b));
+        const requirements = mitreKnowledgeGraph.getLogRequirements(techniqueId);
+        const requiredDcByKey = new Map<string, string>();
+        requirements.forEach((requirement) => {
+          const rawCandidates = [
+            requirement.dataComponentName,
+            requirement.dataComponentId,
+          ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+          rawCandidates.forEach((candidate) => {
+            extractDcNameVariants(candidate).forEach((variant) => {
+              const key = normalizeDcKey(variant);
+              if (!key || requiredDcByKey.has(key)) return;
+              requiredDcByKey.set(key, variant);
+            });
+          });
+        });
+
+        const matchedRequiredDataComponents: string[] = [];
+        requiredDcByKey.forEach((label, key) => {
+          const selected = selectedDcByKey.get(key);
+          if (selected) {
+            matchedRequiredDataComponents.push(selected || label);
+          }
+        });
+
+        const requiredDataComponents = Array.from(new Set(Array.from(requiredDcByKey.values()))).sort((a, b) => a.localeCompare(b));
+        const requiredCount = requiredDataComponents.length;
+        const matchedCount = matchedRequiredDataComponents.length;
+        const requirementCoverageRatio = requiredCount > 0 ? matchedCount / requiredCount : 0;
+
+        let status: TechniqueAssessmentStatus = "candidate";
+        let scoreCategory: TechniqueScoreCategory = "Minimal";
+
+        if (requiredCount > 0 && (requirementCoverageRatio >= 0.6 || matchedCount >= 3)) {
+          status = "confirmed";
+          scoreCategory = requirementCoverageRatio >= 0.85 || matchedCount >= 5 ? "Significant" : "Partial";
+        }
+
+        const scoreValue = requiredCount > 0
+          ? `Guided telemetry ${matchedCount}/${requiredCount} required DCs`
+          : `Guided telemetry ${mappedList.length} mapped DC${mappedList.length === 1 ? "" : "s"}`;
+
+        return {
+          techniqueId,
+          techniqueName,
+          status,
+          scoreCategory,
+          scoreValue,
+          mappedDataComponents: mappedList,
+          requiredDataComponents,
+          matchedRequiredDataComponents: Array.from(new Set(matchedRequiredDataComponents)).sort((a, b) => a.localeCompare(b)),
+          requirementCoverageRatio: Number(requirementCoverageRatio.toFixed(3)),
+        };
+      };
+
+      const techniqueAssessments = new Map<string, TechniqueAssessment>();
+      techniqueById.forEach(({ technique, dataComponents }) => {
+        techniqueAssessments.set(
+          technique.id,
+          assessTechnique(technique.id, technique.name || technique.id, dataComponents)
+        );
+      });
+
+      const techniquesByPlatform = new Map<string, Array<{
+        id: string;
+        name: string;
+        dataComponents: Set<string>;
+        assessment: TechniqueAssessment;
+      }>>();
       normalizedPlatforms.forEach((platform) => {
         techniquesByPlatform.set(platform, []);
       });
 
       const matchedTechniqueIds = new Set<string>();
       techniqueById.forEach(({ technique, dataComponents }) => {
+        const assessment = techniqueAssessments.get(technique.id)
+          || assessTechnique(technique.id, technique.name || technique.id, dataComponents);
         normalizedPlatforms.forEach((platform) => {
           if (!platformMatchesAny(technique.platforms, [platform])) return;
           matchedTechniqueIds.add(technique.id);
@@ -501,6 +622,7 @@ export async function registerRoutes(
             id: technique.id,
             name: technique.name,
             dataComponents,
+            assessment,
           });
         });
       });
@@ -539,14 +661,18 @@ export async function registerRoutes(
           techniqueId: tech.id,
           techniqueName: tech.name || tech.id,
           mappingType: "Detect",
-          scoreCategory: "Minimal",
-          scoreValue: "Guided telemetry",
+          scoreCategory: tech.assessment.scoreCategory,
+          scoreValue: tech.assessment.scoreValue,
           comments: "Guided questions",
           metadata: {
             coverage_type: "wizard_guided",
             mapped_data_components: Array.from(tech.dataComponents),
             question_ids: Array.from(questionIds),
             stream_names: Array.from(streamNames),
+            technique_status: tech.assessment.status,
+            required_data_components: tech.assessment.requiredDataComponents,
+            matched_required_data_components: tech.assessment.matchedRequiredDataComponents,
+            requirement_coverage_ratio: tech.assessment.requirementCoverageRatio,
           },
         }));
 
@@ -556,9 +682,26 @@ export async function registerRoutes(
         }
       }
 
+      const matchedAssessments = Array.from(matchedTechniqueIds)
+        .map((techniqueId) => techniqueAssessments.get(techniqueId))
+        .filter((assessment): assessment is TechniqueAssessment => Boolean(assessment))
+        .sort((a, b) => a.techniqueId.localeCompare(b.techniqueId));
+
+      const statusCounts = matchedAssessments.reduce(
+        (acc, assessment) => {
+          acc[assessment.status] += 1;
+          return acc;
+        },
+        { confirmed: 0, candidate: 0 }
+      );
+
       res.json({
         techniques: matchedTechniqueIds.size,
         techniqueIds: Array.from(matchedTechniqueIds),
+        confirmedTechniques: statusCounts.confirmed,
+        candidateTechniques: statusCounts.candidate,
+        statusCounts,
+        techniqueStates: matchedAssessments,
         dataComponents: resolvedComponents.length,
         sources: Array.from(dataSources),
         platforms: normalizedPlatforms,

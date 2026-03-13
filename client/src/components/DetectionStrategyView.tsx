@@ -104,7 +104,7 @@ function AnalyticCard({ analytic, index }: { analytic: AnalyticItem; index: numb
           <div>
             <h5 className="text-sm font-medium text-foreground mb-3 flex items-center gap-2">
               <Database className="w-4 h-4 text-blue-400" />
-              Required Data Components
+              Data Components
             </h5>
             <div className="space-y-3">
               {dcRefs.map(dc => (
@@ -198,7 +198,7 @@ function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms:
 
       <div className="p-4 border-t border-blue-500/20 bg-muted/20">
         <h6 className="text-xs font-medium text-foreground mb-3 uppercase tracking-wide">
-          Mutable Elements (Required Fields)
+          Mutable Elements (Fields)
         </h6>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {(dc.mutableElements || []).map((me: any) => (
@@ -291,7 +291,7 @@ export function DetectionStrategyView({ strategy, onBack }: DetectionStrategyVie
           Analytics
         </h3>
         <p className="text-sm text-muted-foreground">
-          Click on an analytic to see required log sources, event channels, event codes, and mutable elements.
+          Click on an analytic to see log sources, event channels, event codes, and mutable elements.
         </p>
         
         <div className="space-y-3">

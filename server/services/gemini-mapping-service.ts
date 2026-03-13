@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { settingsService } from "./settings-service";
 import { buildGroundedConfig } from "./gemini-config";
 import { normalizePlatformList } from "../../shared/platforms";
+import { mitreKnowledgeGraph } from "../mitre-stix/knowledge-graph";
 import decisionSchema from "../schemas/gemini-mapping-decision.schema.json";
 import { z } from "zod";
 
@@ -39,6 +40,7 @@ export interface GeminiMappingResult {
 export interface GeminiMappingDecision {
   id: string;
   selected: boolean;
+  status?: "supported" | "unsupported" | "unresolved";
   reason?: string;
   evidence?: string;
   sourceUrl?: string;
@@ -68,6 +70,8 @@ export interface GeminiMappingMetrics {
   optimizedLatencyMs?: number;
   selectedParity?: boolean;
   selectedDeltaCount?: number;
+  selectedAddedCount?: number;
+  selectedRemovedCount?: number;
   schemaValidRate?: number;
   cacheUsed?: boolean;
   cacheKey?: string;
@@ -85,7 +89,8 @@ const DEFAULT_PIPELINE_MODE: GeminiPipelineMode = "legacy";
 const DEFAULT_CACHE_TTL = "43200s";
 const OPT_MAX_RESEARCH_QUERIES_PER_DC = 2;
 const OPT_HIGH_VALUE_EXTRA_QUERIES = 1;
-const OPT_TRIAGE_TOP_LIMIT = 36;
+const LEGACY_PROMPT_VERSION = "legacy-dc-map-v3";
+const OPTIMIZED_PROMPT_VERSION = "optimized-dc-map-v3";
 
 const normalizeUrl = (value: string) => value.trim().replace(/#.*$/, "").replace(/\/$/, "");
 
@@ -262,6 +267,7 @@ const normalizeDecision = (
   return {
     id: canonicalId,
     selected,
+    status: selected ? "supported" : "unsupported",
     reason,
     evidence,
     sourceUrl,
@@ -508,11 +514,12 @@ export class GeminiMappingService {
       deploymentModel = "SELF_MANAGED";
     }
     const loggingCapabilities = "Not provided";
-    const evaluationDate = new Date().toISOString().slice(0, 10);
 
     return `
 You are a MITRE ATT&CK Data Component mapping analyst. Your task is to evaluate 
 whether a specific vendor product generates telemetry for MITRE ATT&CK Data Components.
+
+Prompt Version: "${LEGACY_PROMPT_VERSION}"
 
 PRODUCT DEFINITION
 ==================
@@ -616,8 +623,7 @@ JSON Structure:
     "name": "${product}",
     "aliases": [${aliasList.map((alias) => `"${alias}"`).join(", ")}],
     "deployment_model": "${deploymentModel}",
-    "platforms": [${platformTokens.map((platform) => `"${platform}"`).join(", ")}],
-    "evaluation_date": "${evaluationDate}"
+    "platforms": [${platformTokens.map((platform) => `"${platform}"`).join(", ")}]
   },
   "summary": {
     "total_candidates": <NUMBER>,
@@ -716,22 +722,32 @@ INSTRUCTIONS
     return new Set((result.suggestedIds || []).map((id) => id.toLowerCase()));
   }
 
-  private compareSelectedParity(a: GeminiMappingResult, b: GeminiMappingResult): { parity: boolean; delta: number } {
-    const left = this.selectedIdSet(a);
-    const right = this.selectedIdSet(b);
-    let delta = 0;
-    left.forEach((id) => {
-      if (!right.has(id)) delta += 1;
-    });
+  private compareSelectedCoverage(
+    baseline: GeminiMappingResult,
+    candidate: GeminiMappingResult
+  ): { parity: boolean; delta: number; added: string[]; removed: string[] } {
+    const left = this.selectedIdSet(baseline);
+    const right = this.selectedIdSet(candidate);
+    const added: string[] = [];
+    const removed: string[] = [];
     right.forEach((id) => {
-      if (!left.has(id)) delta += 1;
+      if (!left.has(id)) added.push(id);
     });
-    return { parity: delta === 0, delta };
+    left.forEach((id) => {
+      if (!right.has(id)) removed.push(id);
+    });
+    return {
+      parity: removed.length === 0,
+      delta: added.length + removed.length,
+      added,
+      removed,
+    };
   }
 
   private buildOptimizedPolicyPrefix(): string {
     return `
 ROLE: Detection engineer mapping MITRE ATT&CK Data Components to product-native telemetry.
+PROMPT VERSION: ${OPTIMIZED_PROMPT_VERSION}
 
 NON-NEGOTIABLES
 - Output valid JSON only.
@@ -861,6 +877,164 @@ Tasks:
 CANDIDATES
 ${allLines}
 `.trim();
+  }
+
+  private async applyCoverageClosure(
+    client: GoogleGenAI,
+    modelName: string,
+    input: GeminiMappingInput,
+    result: GeminiMappingResult
+  ): Promise<GeminiMappingResult> {
+    const candidateList = Array.isArray(input.candidates) ? input.candidates : [];
+    const decisions = Array.isArray(result.decisions) ? result.decisions : [];
+    if (candidateList.length === 0 || decisions.length === 0) {
+      return result;
+    }
+
+    const unresolvedIds = new Set(
+      decisions
+        .filter((decision) => decision.status === "unresolved")
+        .map((decision) => decision.id)
+    );
+    if (unresolvedIds.size === 0) {
+      return result;
+    }
+
+    await mitreKnowledgeGraph.ensureInitialized();
+
+    const normalizeDcKey = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const candidateById = new Map(candidateList.map((candidate) => [candidate.id, candidate]));
+    const candidateByCompactId = new Map(candidateList.map((candidate) => [normalizeDcKey(candidate.id), candidate]));
+    const candidatesByName = new Map<string, GeminiDataComponentCandidate[]>();
+    candidateList.forEach((candidate) => {
+      const key = normalizeDcKey(candidate.name);
+      const existing = candidatesByName.get(key) || [];
+      existing.push(candidate);
+      candidatesByName.set(key, existing);
+    });
+
+    const supportedTechniqueIds = new Set<string>();
+    decisions
+      .filter((decision) => decision.selected)
+      .forEach((decision) => {
+        const candidate = candidateById.get(decision.id);
+        if (!candidate) return;
+        const techniques = mitreKnowledgeGraph.getTechniquesByDataComponentName(candidate.name);
+        techniques.forEach((technique) => supportedTechniqueIds.add(technique.id));
+      });
+
+    if (supportedTechniqueIds.size === 0) {
+      return result;
+    }
+
+    const closureScores = new Map<string, number>();
+    const addClosureCandidate = (candidate: GeminiDataComponentCandidate) => {
+      if (!unresolvedIds.has(candidate.id)) return;
+      closureScores.set(candidate.id, (closureScores.get(candidate.id) || 0) + 1);
+    };
+
+    supportedTechniqueIds.forEach((techniqueId) => {
+      const requirementMatches = new Set<string>();
+      mitreKnowledgeGraph.getLogRequirements(techniqueId).forEach((requirement) => {
+        const directId = candidateById.get(requirement.dataComponentId);
+        if (directId) requirementMatches.add(directId.id);
+        const compactId = candidateByCompactId.get(normalizeDcKey(requirement.dataComponentId));
+        if (compactId) requirementMatches.add(compactId.id);
+        const byName = candidatesByName.get(normalizeDcKey(requirement.dataComponentName)) || [];
+        byName.forEach((candidate) => requirementMatches.add(candidate.id));
+      });
+      requirementMatches.forEach((candidateId) => {
+        const candidate = candidateById.get(candidateId);
+        if (candidate) addClosureCandidate(candidate);
+      });
+    });
+
+    const closureCandidates = Array.from(closureScores.entries())
+      .sort((a, b) => {
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return a[0].localeCompare(b[0]);
+      })
+      .map(([candidateId]) => candidateById.get(candidateId))
+      .filter((candidate): candidate is GeminiDataComponentCandidate => Boolean(candidate));
+
+    if (closureCandidates.length === 0) {
+      return result;
+    }
+
+    const decisionMap = new Map(decisions.map((decision) => [decision.id, decision]));
+    const sourceMap = new Map<string, { title?: string; url: string }>();
+    (result.sources || []).forEach((source) => {
+      if (!source?.url) return;
+      sourceMap.set(normalizeUrl(source.url), source);
+    });
+
+    const chunkCandidates = <T,>(items: T[], size: number): T[][] => {
+      const chunks: T[][] = [];
+      for (let index = 0; index < items.length; index += size) {
+        chunks.push(items.slice(index, index + size));
+      }
+      return chunks;
+    };
+
+    const closureNotes: string[] = [
+      `Coverage closure rechecked ${closureCandidates.length} unresolved data component(s) tied to ${supportedTechniqueIds.size} selected technique(s).`,
+    ];
+
+    const closureBatches = chunkCandidates(closureCandidates, MAX_CANDIDATES_PER_PROMPT);
+    for (let batchIndex = 0; batchIndex < closureBatches.length; batchIndex += 1) {
+      const batch = closureBatches[batchIndex];
+      const candidateMap = new Map(batch.map((candidate) => [candidate.id.toLowerCase(), candidate.id]));
+      try {
+        const payload = this.buildOptimizedEvidencePayload(input, batch, batch, []);
+        const response = await this.generateWithRetries(
+          client,
+          modelName,
+          payload,
+          await buildGroundedConfig() as any
+        );
+        const responseText = await readResponseText(response);
+        const parsedPayload = extractJsonPayload(responseText);
+        const extractedSources = extractSources(response);
+        extractedSources.forEach((value, key) => {
+          if (!sourceMap.has(key)) sourceMap.set(key, value);
+        });
+        const allowedUrls = new Set(Array.from(extractedSources.keys()).map((url) => url.toLowerCase()));
+        const normalizedDecisions = (parsedPayload.decisions || [])
+          .map((entry) => normalizeDecision(entry, candidateMap, allowedUrls, extractedSources))
+          .filter((decision): decision is GeminiMappingDecision => Boolean(decision));
+
+        if (normalizedDecisions.length === 0) {
+          closureNotes.push(`Closure batch ${batchIndex + 1} returned no schema-valid decisions.`);
+        }
+
+        normalizedDecisions.forEach((decision) => {
+          decisionMap.set(decision.id, decision);
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        closureNotes.push(`Closure batch ${batchIndex + 1} failed: ${message}`);
+      }
+    }
+
+    const finalDecisions = candidateList.map((candidate) => (
+      decisionMap.get(candidate.id) || {
+        id: candidate.id,
+        selected: false,
+        status: "unresolved" as const,
+        notes: "No decision returned after coverage closure.",
+      }
+    ));
+
+    return {
+      ...result,
+      suggestedIds: finalDecisions.filter((decision) => decision.selected).map((decision) => decision.id),
+      decisions: finalDecisions,
+      sources: Array.from(sourceMap.values()),
+      notes: [
+        result.notes,
+        ...closureNotes,
+      ].filter((note): note is string => typeof note === "string" && note.trim().length > 0).join(" "),
+    };
   }
 
   private async generateWithRetries(
@@ -1039,6 +1213,7 @@ ${allLines}
       decisionMap.get(candidate.id) || {
         id: candidate.id,
         selected: false,
+        status: "unresolved" as const,
         notes: `No schema-valid decision returned after ${attemptCounts.get(candidate.id) || 0} attempt(s).`,
       }
     ));
@@ -1167,8 +1342,7 @@ ${allLines}
         });
       }
 
-      const limitedShortlist = Array.from(shortlistIds).slice(0, OPT_TRIAGE_TOP_LIMIT);
-      const evidenceCandidates = batch.filter((candidate: GeminiDataComponentCandidate) => limitedShortlist.includes(candidate.id));
+      const evidenceCandidates = batch.filter((candidate: GeminiDataComponentCandidate) => shortlistIds.has(candidate.id));
 
       if (evidenceCandidates.length > 0) {
         const hardNoList = Array.from(hardNoIds);
@@ -1207,15 +1381,29 @@ ${allLines}
       batch.forEach((candidate: GeminiDataComponentCandidate) => {
         if (decisionMap.has(candidate.id)) return;
         if (hardNoIds.has(candidate.id)) {
-          decisionMap.set(candidate.id, { id: candidate.id, selected: false, notes: "Hard contradiction in triage." });
+          decisionMap.set(candidate.id, {
+            id: candidate.id,
+            selected: false,
+            status: "unsupported",
+            notes: "Hard contradiction in triage.",
+          });
           return;
         }
-        decisionMap.set(candidate.id, { id: candidate.id, selected: false, notes: "No evidence-confirmed support in optimized pass." });
+        decisionMap.set(candidate.id, {
+          id: candidate.id,
+          selected: false,
+          status: "unresolved",
+          notes: "No evidence-confirmed support was returned in optimized pass.",
+        });
       });
     }
 
     const finalDecisions = candidateList.map((candidate) => (
-      decisionMap.get(candidate.id) || { id: candidate.id, selected: false }
+      decisionMap.get(candidate.id) || {
+        id: candidate.id,
+        selected: false,
+        status: "unresolved" as const,
+      }
     ));
     const suggestedIds = finalDecisions.filter((decision) => decision.selected).map((decision) => decision.id);
     const dedupedNotes = Array.from(new Set(notes.map((note) => note.trim()).filter(Boolean)));
@@ -1256,7 +1444,12 @@ ${allLines}
 
       const mode = await this.getPipelineMode();
       if (mode === "legacy") {
-        const result = await this.runLegacyMapping(client, modelName, input);
+        const result = await this.applyCoverageClosure(
+          client,
+          modelName,
+          input,
+          await this.runLegacyMapping(client, modelName, input)
+        );
         result.metrics = {
           ...result.metrics,
           pipelineMode: "legacy",
@@ -1265,20 +1458,30 @@ ${allLines}
       }
 
       if (mode === "shadow") {
-        const legacyResult = await this.runLegacyMapping(client, modelName, input);
+        const legacyResult = await this.applyCoverageClosure(
+          client,
+          modelName,
+          input,
+          await this.runLegacyMapping(client, modelName, input)
+        );
         let optimizedResult: GeminiMappingResult | null = null;
         try {
-          optimizedResult = await this.runOptimizedMapping(client, modelName, input);
+          optimizedResult = await this.applyCoverageClosure(
+            client,
+            modelName,
+            input,
+            await this.runOptimizedMapping(client, modelName, input)
+          );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           legacyResult.notes = `${legacyResult.notes ? `${legacyResult.notes} ` : ""}Optimized shadow run failed: ${message}`;
         }
 
         if (optimizedResult) {
-          const parity = this.compareSelectedParity(legacyResult, optimizedResult);
+          const parity = this.compareSelectedCoverage(legacyResult, optimizedResult);
           legacyResult.notes = [
             legacyResult.notes || "",
-            `Shadow parity=${parity.parity ? "match" : "mismatch"} delta=${parity.delta}.`,
+            `Shadow additive parity=${parity.parity ? "pass" : "fail"} added=${parity.added.length} removed=${parity.removed.length}.`,
           ].filter(Boolean).join(" ");
           legacyResult.metrics = {
             pipelineMode: "shadow",
@@ -1286,6 +1489,8 @@ ${allLines}
             optimizedLatencyMs: optimizedResult.metrics?.optimizedLatencyMs,
             selectedParity: parity.parity,
             selectedDeltaCount: parity.delta,
+            selectedAddedCount: parity.added.length,
+            selectedRemovedCount: parity.removed.length,
             schemaValidRate: legacyResult.metrics?.schemaValidRate,
             cacheUsed: optimizedResult.metrics?.cacheUsed,
             cacheKey: optimizedResult.metrics?.cacheKey,
@@ -1299,7 +1504,12 @@ ${allLines}
         return legacyResult;
       }
 
-      const optimizedResult = await this.runOptimizedMapping(client, modelName, input);
+      const optimizedResult = await this.applyCoverageClosure(
+        client,
+        modelName,
+        input,
+        await this.runOptimizedMapping(client, modelName, input)
+      );
       const requireParity = await this.requireLegacyParityGuard();
       if (!requireParity) {
         optimizedResult.metrics = {
@@ -1309,12 +1519,17 @@ ${allLines}
         return optimizedResult;
       }
 
-      const legacyResult = await this.runLegacyMapping(client, modelName, input);
-      const parity = this.compareSelectedParity(legacyResult, optimizedResult);
+      const legacyResult = await this.applyCoverageClosure(
+        client,
+        modelName,
+        input,
+        await this.runLegacyMapping(client, modelName, input)
+      );
+      const parity = this.compareSelectedCoverage(legacyResult, optimizedResult);
       if (!parity.parity) {
         legacyResult.notes = [
           legacyResult.notes || "",
-          `Optimized result rejected by parity guard (delta=${parity.delta}); legacy result returned.`,
+          `Optimized result rejected by additive parity guard; added=${parity.added.length}, removed=${parity.removed.length}.`,
         ].filter(Boolean).join(" ");
         legacyResult.metrics = {
           pipelineMode: "optimized",
@@ -1322,6 +1537,8 @@ ${allLines}
           optimizedLatencyMs: optimizedResult.metrics?.optimizedLatencyMs,
           selectedParity: false,
           selectedDeltaCount: parity.delta,
+          selectedAddedCount: parity.added.length,
+          selectedRemovedCount: parity.removed.length,
           schemaValidRate: legacyResult.metrics?.schemaValidRate,
           cacheUsed: optimizedResult.metrics?.cacheUsed,
           cacheKey: optimizedResult.metrics?.cacheKey,
@@ -1331,14 +1548,16 @@ ${allLines}
 
       optimizedResult.notes = [
         optimizedResult.notes || "",
-        "Optimized result passed legacy parity guard.",
+        `Optimized result passed additive parity guard; added=${parity.added.length}, removed=${parity.removed.length}.`,
       ].filter(Boolean).join(" ");
       optimizedResult.metrics = {
         pipelineMode: "optimized",
         legacyLatencyMs: legacyResult.metrics?.legacyLatencyMs,
         optimizedLatencyMs: optimizedResult.metrics?.optimizedLatencyMs,
         selectedParity: true,
-        selectedDeltaCount: 0,
+        selectedDeltaCount: parity.delta,
+        selectedAddedCount: parity.added.length,
+        selectedRemovedCount: parity.removed.length,
         schemaValidRate: optimizedResult.metrics?.schemaValidRate,
         cacheUsed: optimizedResult.metrics?.cacheUsed,
         cacheKey: optimizedResult.metrics?.cacheKey,

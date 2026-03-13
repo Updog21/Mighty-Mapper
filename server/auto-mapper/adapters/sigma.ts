@@ -271,6 +271,10 @@ export class SigmaAdapter implements ResourceAdapter {
 
     for (const item of extractedRules) {
       const ruleTechniqueIds = new Set<string>();
+      const hasExplicitTechnique = item.foundIds.some((idObj) => idObj.type === 'technique');
+      const matchedDataComponents = new Set<string>();
+      let inferredFromDataComponent = false;
+      let missingTacticForInference = false;
 
       // Resolve IDs using Workbench
       for (const idObj of item.foundIds) {
@@ -284,21 +288,43 @@ export class SigmaAdapter implements ResourceAdapter {
           }
         }
         else if (idObj.type === 'data-component') {
-          // We have the DC Name. Ask Workbench for the T-IDs.
-          const tactic = this.extractTactic(item.tags); // Use tags from rule root
+          matchedDataComponents.add(idObj.id);
+          dcMap.add(idObj.id);
+
+          const tactic = this.extractTactic(item.tags);
+          if (!tactic) {
+            missingTacticForInference = true;
+            continue;
+          }
+
           const inferredTechs = mitreKnowledgeGraph.getTechniquesByTacticAndDataComponent(
-            tactic || 'execution', // Default tactic if none found
-            idObj.id               // The Data Component Name
+            tactic,
+            idObj.id
           );
 
+          if (inferredTechs.length > 0) {
+            inferredFromDataComponent = true;
+          }
+
           inferredTechs.forEach(t => {
-            techniquesSet.add(t.id);
             ruleTechniqueIds.add(t.id);
           });
-
-          // Also track the Data Component itself for the UI
-          dcMap.add(idObj.id);
         }
+      }
+
+      let coverageKind: AnalyticMapping['coverageKind'] = 'candidate';
+      let evidenceTier: AnalyticMapping['evidenceTier'] = 'weak';
+      let mappingMethod: AnalyticMapping['mappingMethod'] = 'tactic_data_component_inference';
+
+      if (hasExplicitTechnique) {
+        coverageKind = 'detect';
+        evidenceTier = 'strong';
+        mappingMethod = 'explicit_attack_id';
+        ruleTechniqueIds.forEach((techniqueId) => techniquesSet.add(techniqueId));
+      } else if (inferredFromDataComponent && ruleTechniqueIds.size > 0) {
+        coverageKind = 'visibility';
+        evidenceTier = 'medium';
+        mappingMethod = 'tactic_data_component_inference';
       }
 
       // Add Analytic (From Rule)
@@ -313,10 +339,19 @@ export class SigmaAdapter implements ResourceAdapter {
         repoName: 'Sigma',
         ruleId: item.ruleId,
         rawSource: this.getRawSource(item.logsource),
+        mappingMethod,
+        evidenceTier,
+        coverageKind,
+        requiresValidation: hasExplicitTechnique,
         metadata: {
           log_sources: this.formatLogSources(item.logsource),
           query: item.detection || undefined,
           caveats: item.falsepositives && item.falsepositives.length > 0 ? item.falsepositives : undefined,
+          matched_data_components: Array.from(matchedDataComponents),
+          missing_tactic_for_inference: missingTacticForInference || undefined,
+          mapping_method: mappingMethod,
+          evidence_tier: evidenceTier,
+          coverage_kind: coverageKind,
         },
       });
     }

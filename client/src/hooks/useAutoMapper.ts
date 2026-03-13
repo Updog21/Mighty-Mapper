@@ -41,6 +41,9 @@ export interface EnrichedCommunityMapping {
   source: string;
   confidence: number;
   techniqueIds: string[];
+  detectTechniqueIds: string[];
+  visibilityTechniqueIds: string[];
+  candidateAnalyticsCount: number;
   detectionStrategies: StixDetectionStrategy[];
   dataComponents: StixDataComponent[];
   communityAnalytics: AnalyticMapping[];
@@ -60,6 +63,16 @@ export interface AnalyticMapping {
   query?: string;
   source?: ResourceType;
   sourceFile?: string;
+  mappingMethod?:
+    | 'explicit_attack_id'
+    | 'ctid_import'
+    | 'tactic_data_component_inference'
+    | 'source_hint_inference'
+    | 'stream_data_component_inference'
+    | 'mitre_keyword_match';
+  evidenceTier?: 'strong' | 'medium' | 'weak';
+  coverageKind?: 'detect' | 'visibility' | 'candidate';
+  requiresValidation?: boolean;
   validationStatus?: 'pending' | 'valid' | 'invalid' | 'uncertain';
   aiConfidence?: number;
   mutableElements?: string[];
@@ -169,17 +182,21 @@ export function useAutoMappingWithAutoRun(
   const [stixLoading, setStixLoading] = useState(false);
   
   const baseTechniqueIds = useMemo(() => {
-    if (!rawData?.mapping || rawData.status !== 'matched') {
+    if (!rawData?.mapping || (rawData.status !== 'matched' && rawData.status !== 'partial')) {
       return [];
     }
     
     const rawStrategies = rawData.mapping.detectionStrategies || [];
-    return rawStrategies.map((id: string) => {
+    const strategyTechniqueIds = rawStrategies.map((id: string) => {
       if (id.startsWith('DS-')) {
         return id.substring(3);
       }
       return id;
     });
+    const analyticsTechniqueIds = (rawData.mapping.analytics || [])
+      .flatMap((analytic) => analytic.techniqueIds || []);
+
+    return Array.from(new Set([...strategyTechniqueIds, ...analyticsTechniqueIds]));
   }, [rawData]);
 
   const combinedTechniqueIds = useMemo(() => {
@@ -218,17 +235,39 @@ export function useAutoMappingWithAutoRun(
   }, [combinedTechniqueIds.join(','), platform, hybridSelectors?.join(',')]);
 
   const enrichedMapping = useMemo((): EnrichedCommunityMapping | null => {
-    if (!rawData?.mapping || rawData.status !== 'matched') {
+    if (!rawData?.mapping || (rawData.status !== 'matched' && rawData.status !== 'partial')) {
       return null;
     }
+
+    const analytics = rawData.mapping.analytics || [];
+    const detectTechniqueIds = Array.from(new Set(
+      analytics
+        .filter((analytic) => analytic.coverageKind === 'detect')
+        .flatMap((analytic) => analytic.techniqueIds || [])
+        .map((id) => id.toUpperCase())
+    ));
+    const visibilityTechniqueIds = Array.from(new Set(
+      analytics
+        .filter((analytic) => analytic.coverageKind === 'visibility')
+        .flatMap((analytic) => analytic.techniqueIds || [])
+        .map((id) => id.toUpperCase())
+    ));
+    const allTechniqueIds = Array.from(new Set([
+      ...detectTechniqueIds,
+      ...visibilityTechniqueIds,
+      ...combinedTechniqueIds.map((id) => id.toUpperCase()),
+    ]));
     
     return {
       source: rawData.source || 'unknown',
       confidence: rawData.confidence || 0,
-      techniqueIds: combinedTechniqueIds,
+      techniqueIds: allTechniqueIds,
+      detectTechniqueIds,
+      visibilityTechniqueIds,
+      candidateAnalyticsCount: analytics.filter((analytic) => analytic.coverageKind === 'candidate').length,
       detectionStrategies: stixMapping?.detectionStrategies || [],
       dataComponents: stixMapping?.dataComponents || [],
-      communityAnalytics: rawData.mapping.analytics,
+      communityAnalytics: analytics,
       techniqueSources: rawData.mapping.techniqueSources || {},
       techniqueNames: stixMapping?.techniqueNames || {},
     };

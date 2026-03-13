@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#c4b5fd"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="256" fill="#0c0a1a"/>
+  <!-- Main gear - outer teeth -->
+  <g transform="translate(256,248)">
+    <!-- Gear teeth (16 teeth) -->
+    <g fill="url(#g1)">
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(0)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(22.5)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(45)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(67.5)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(90)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(112.5)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(135)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(157.5)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(180)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(202.5)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(225)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(247.5)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(270)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(292.5)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(315)"/>
+      <rect x="-16" y="-168" width="32" height="36" rx="4" transform="rotate(337.5)"/>
+    </g>
+    <!-- Gear body -->
+    <circle cx="0" cy="0" r="150" fill="none" stroke="url(#g1)" stroke-width="18"/>
+    <!-- Inner ring -->
+    <circle cx="0" cy="0" r="115" fill="none" stroke="url(#g2)" stroke-width="3" opacity="0.6"/>
+    <!-- Spoke lines (Antikythera-style dial markings) -->
+    <g stroke="url(#g2)" stroke-width="2" opacity="0.4">
+      <line x1="0" y1="-115" x2="0" y2="-80"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(30)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(60)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(90)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(120)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(150)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(180)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(210)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(240)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(270)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(300)"/>
+      <line x1="0" y1="-115" x2="0" y2="-80" transform="rotate(330)"/>
+    </g>
+    <!-- Inner mechanism ring -->
+    <circle cx="0" cy="0" r="78" fill="none" stroke="url(#g2)" stroke-width="2.5" opacity="0.5"/>
+    <!-- Pointer / hand (like an astronomical dial) -->
+    <line x1="0" y1="10" x2="0" y2="-105" stroke="#c4b5fd" stroke-width="3.5" stroke-linecap="round" transform="rotate(-35)"/>
+    <line x1="0" y1="10" x2="0" y2="-72" stroke="#a78bfa" stroke-width="2.5" stroke-linecap="round" transform="rotate(80)"/>
+    <!-- Center hub -->
+    <circle cx="0" cy="0" r="18" fill="url(#g1)"/>
+    <circle cx="0" cy="0" r="9" fill="#0c0a1a"/>
+    <circle cx="0" cy="0" r="4" fill="#a78bfa"/>
+  </g>
+  <!-- Small secondary gear (offset, interlocking) -->
+  <g transform="translate(370,370)">
+    <g fill="url(#g2)" opacity="0.7">
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(0)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(36)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(72)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(108)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(144)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(180)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(216)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(252)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(288)"/>
+      <rect x="-10" y="-68" width="20" height="22" rx="3" transform="rotate(324)"/>
+    </g>
+    <circle cx="0" cy="0" r="56" fill="none" stroke="url(#g2)" stroke-width="12" opacity="0.7"/>
+    <circle cx="0" cy="0" r="12" fill="url(#g2)" opacity="0.7"/>
+    <circle cx="0" cy="0" r="5" fill="#0c0a1a"/>
+  </g>
+</svg>

@@ -53,7 +53,7 @@ function LogRequirementCard({ log, index }: { log: LogRequirement; index: number
         </div>
         
         <div>
-          <span className="text-xs font-medium text-foreground">Required Fields:</span>
+          <span className="text-xs font-medium text-foreground">Fields:</span>
           <div className="flex flex-wrap gap-1 mt-1">
             {log.requiredFields.map((field) => (
               <Badge key={field} variant="secondary" className="font-mono text-[10px]">

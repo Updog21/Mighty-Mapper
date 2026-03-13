@@ -130,6 +130,14 @@ export class MitreStixAdapter implements ResourceAdapter {
           name: `Monitor ${obj.name}`,
           description: obj.description,
           source: 'mitre_stix',
+          mappingMethod: 'mitre_keyword_match',
+          evidenceTier: 'weak',
+          coverageKind: 'candidate',
+          metadata: {
+            mapping_method: 'mitre_keyword_match',
+            evidence_tier: 'weak',
+            coverage_kind: 'candidate',
+          },
         });
       } else if (obj.type === 'x-mitre-data-source') {
         dataComponents.push({
@@ -145,6 +153,14 @@ export class MitreStixAdapter implements ResourceAdapter {
           name: `Asset: ${obj.name}`,
           description: obj.description,
           source: 'mitre_stix',
+          mappingMethod: 'mitre_keyword_match',
+          evidenceTier: 'weak',
+          coverageKind: 'candidate',
+          metadata: {
+            mapping_method: 'mitre_keyword_match',
+            evidence_tier: 'weak',
+            coverage_kind: 'candidate',
+          },
         });
       }
     }

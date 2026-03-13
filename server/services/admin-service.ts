@@ -6,8 +6,8 @@ import { db } from '../db';
 import { dataComponentPlatforms, dataComponents, detectionStrategies } from '@shared/schema';
 import { settingsService } from './settings-service';
 import { mitreKnowledgeGraph } from '../mitre-stix';
-import { aggregateAllChannels } from '../mitre-stix/channel-aggregator';
 import { normalizePlatformList, PLATFORM_VALUES } from '../../shared/platforms';
+import { productService } from './product-service';
 
 const runCommand = (command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> => {
   return new Promise((resolve, reject) => {
@@ -93,6 +93,27 @@ export class AdminService {
   private mitreSyncInterval?: NodeJS.Timeout;
   private repoSyncTimer?: NodeJS.Timeout;
   private repoSyncInterval?: NodeJS.Timeout;
+  private draftCleanupTimer?: NodeJS.Timeout;
+  private draftCleanupInterval?: NodeJS.Timeout;
+
+  async cleanupStaleWizardDrafts(trigger: 'startup' | 'manual' | 'scheduled' = 'startup'): Promise<{
+    status: string;
+    message: string;
+    deleted: number;
+  }> {
+    try {
+      const deleted = await productService.cleanupStaleWizardDrafts(24);
+      console.log(`[AdminService] Cleaned up ${deleted} stale wizard draft product(s) (${trigger}).`);
+      return {
+        status: 'success',
+        message: 'Stale wizard drafts cleaned up successfully.',
+        deleted,
+      };
+    } catch (error) {
+      console.error('[AdminService] Failed to clean up stale wizard drafts:', error);
+      throw new Error(`Failed to clean up stale wizard drafts: ${(error as Error).message}`);
+    }
+  }
 
   async rebuildDataComponentPlatformMap(trigger: 'startup' | 'manual' | 'scheduled' = 'startup'): Promise<{
     status: string;
@@ -161,8 +182,8 @@ export class AdminService {
       console.log(`[AdminService] Building data component log source table (${trigger})...`);
       await mitreKnowledgeGraph.ensureInitialized();
 
-      const aggregations = await aggregateAllChannels();
-      if (aggregations.length === 0) {
+      const reverseMapped = mitreKnowledgeGraph.getDataComponentLogSourcesFromAnalytics();
+      if (reverseMapped.length === 0) {
         return {
           status: 'success',
           message: 'No data component log sources available to rebuild.',
@@ -175,25 +196,30 @@ export class AdminService {
       let totalSources = 0;
 
       await db.transaction(async (tx) => {
-        for (const aggregation of aggregations) {
-          const logSources = aggregation.logSources.map((source) => ({
+        // Reset first so stale entries from older MITRE datasets do not linger.
+        await tx.update(dataComponents).set({ logSources: [] });
+
+        for (const mapping of reverseMapped) {
+          const logSources = mapping.logSources.map((source) => ({
             name: source.name,
             channel: source.channel ?? null,
             frequency: source.frequency,
+            platforms: source.platforms,
           }));
-          totalSources += logSources.length;
+          if (logSources.length === 0) continue;
 
+          totalSources += logSources.length;
           const updatedRows = await tx
             .update(dataComponents)
             .set({ logSources })
-            .where(eq(dataComponents.componentId, aggregation.dataComponentId))
+            .where(eq(dataComponents.componentId, mapping.dataComponentId))
             .returning({ componentId: dataComponents.componentId });
 
           if (updatedRows.length === 0) {
             const fallback = await tx
               .update(dataComponents)
               .set({ logSources })
-              .where(eq(dataComponents.name, aggregation.dataComponentName))
+              .where(eq(dataComponents.name, mapping.dataComponentName))
               .returning({ componentId: dataComponents.componentId });
             if (fallback.length > 0) updated += 1;
           } else {
@@ -445,6 +471,33 @@ export class AdminService {
     this.mitreSyncTimer = setTimeout(() => {
       runSync();
       this.mitreSyncInterval = setInterval(runSync, 24 * 60 * 60 * 1000);
+    }, msUntilNextRun);
+  }
+
+  scheduleWizardDraftCleanup(): void {
+    if (this.draftCleanupTimer || this.draftCleanupInterval) {
+      return;
+    }
+
+    const runCleanup = async () => {
+      try {
+        await this.cleanupStaleWizardDrafts('scheduled');
+      } catch (error) {
+        console.error('[AdminService] Scheduled wizard draft cleanup failed:', error);
+      }
+    };
+
+    const now = new Date();
+    const nextRun = new Date(now);
+    nextRun.setHours(2, 30, 0, 0);
+    if (nextRun <= now) {
+      nextRun.setDate(nextRun.getDate() + 1);
+    }
+
+    const msUntilNextRun = nextRun.getTime() - now.getTime();
+    this.draftCleanupTimer = setTimeout(() => {
+      runCleanup();
+      this.draftCleanupInterval = setInterval(runCleanup, 24 * 60 * 60 * 1000);
     }, msUntilNextRun);
   }
 

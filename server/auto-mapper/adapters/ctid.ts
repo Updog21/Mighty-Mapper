@@ -263,6 +263,9 @@ export class CTIDAdapter implements ResourceAdapter {
         ruleId: mapping.capability_id,
         logSources: logSourceNames,
         mutableElements: mutableElementFields,
+        mappingMethod: 'ctid_import',
+        evidenceTier: 'strong',
+        coverageKind: 'detect',
         metadata: {
           data_components: Array.from(enrichedDataComponents),
           log_sources: enrichedLogSources,
@@ -270,6 +273,9 @@ export class CTIDAdapter implements ResourceAdapter {
           stix_log_sources: merged?.logSources,
           stix_mutable_elements: merged?.mutableElements,
           stix_data_components: merged?.dataComponents,
+          mapping_method: 'ctid_import',
+          evidence_tier: 'strong',
+          coverage_kind: 'detect',
         },
       });
     }

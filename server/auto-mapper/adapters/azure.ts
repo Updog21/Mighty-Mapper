@@ -217,13 +217,14 @@ export class AzureAdapter implements ResourceAdapter {
     const seenDataComponents = new Set<string>();
 
     for (const rule of rules) {
-      const ruleTechniqueIds = new Set<string>();
+      const explicitTechniqueIds = new Set<string>();
       for (const id of rule.relevantTechniques || []) {
         const normalized = mitreKnowledgeGraph.normalizeTechniqueId(id);
-        if (normalized) ruleTechniqueIds.add(normalized);
+        if (normalized) explicitTechniqueIds.add(normalized);
       }
 
-      if (ruleTechniqueIds.size === 0) {
+      const inferredTechniqueIds = new Set<string>();
+      if (explicitTechniqueIds.size === 0) {
         const candidateSources = Array.from(new Set([
           ...(rule.dataTypes || []),
           ...(rule.connectorIds || []),
@@ -233,11 +234,18 @@ export class AzureAdapter implements ResourceAdapter {
             candidateSources,
             this.extractTactics(rule.tactics)
           );
-          inferred.forEach(tech => ruleTechniqueIds.add(tech.id));
+          inferred.forEach(tech => inferredTechniqueIds.add(tech.id));
         }
       }
 
-      ruleTechniqueIds.forEach(tid => techniqueIds.add(tid));
+      const ruleTechniqueIds = explicitTechniqueIds.size > 0
+        ? explicitTechniqueIds
+        : inferredTechniqueIds;
+      const coverageKind: AnalyticMapping['coverageKind'] = explicitTechniqueIds.size > 0 ? 'detect' : inferredTechniqueIds.size > 0 ? 'visibility' : 'candidate';
+      const evidenceTier: AnalyticMapping['evidenceTier'] = explicitTechniqueIds.size > 0 ? 'strong' : inferredTechniqueIds.size > 0 ? 'weak' : 'weak';
+      const mappingMethod: AnalyticMapping['mappingMethod'] = explicitTechniqueIds.size > 0 ? 'explicit_attack_id' : 'source_hint_inference';
+
+      explicitTechniqueIds.forEach(tid => techniqueIds.add(tid));
 
       const rawSource = rule.dataTypes?.[0] || rule.connectorIds?.[0];
 
@@ -255,10 +263,18 @@ export class AzureAdapter implements ResourceAdapter {
         sourceFile: rule.filePath ? rule.filePath.split('/').pop() : undefined,
         repoName: 'Azure',
         ruleId: rule.ruleId,
+        mappingMethod,
+        evidenceTier,
+        coverageKind,
         metadata: {
           log_sources: rule.dataTypes,
           query: rule.query,
           mutable_elements: rule.columnNames,
+          explicit_technique_ids: Array.from(explicitTechniqueIds),
+          inferred_technique_ids: Array.from(inferredTechniqueIds),
+          mapping_method: mappingMethod,
+          evidence_tier: evidenceTier,
+          coverage_kind: coverageKind,
         },
       });
 

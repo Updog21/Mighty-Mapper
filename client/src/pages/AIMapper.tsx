@@ -27,7 +27,7 @@ export default function AIMapper() {
 
   const handleComplete = (productId: string) => {
     setShowFlow(false);
-    setLocation(`/?productId=${encodeURIComponent(productId)}`);
+    setLocation(`/products/${encodeURIComponent(productId)}`);
   };
 
   return (

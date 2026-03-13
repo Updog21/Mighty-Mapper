@@ -102,11 +102,15 @@ app.use((req, res, next) => {
   await registerRoutes(httpServer, app);
   adminService.scheduleMitreSync();
   adminService.scheduleRepoSync();
+  adminService.scheduleWizardDraftCleanup();
   adminService.rebuildDataComponentPlatformMap('startup').catch((error) => {
     console.error('[Startup] Failed to build data component platform map:', error);
   });
   adminService.rebuildDataComponentLogSources('startup').catch((error) => {
     console.error('[Startup] Failed to build data component log source map:', error);
+  });
+  adminService.cleanupStaleWizardDrafts('startup').catch((error) => {
+    console.error('[Startup] Failed to clean up stale wizard drafts:', error);
   });
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

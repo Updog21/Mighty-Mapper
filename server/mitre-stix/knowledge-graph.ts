@@ -1310,6 +1310,7 @@ export class MitreKnowledgeGraph {
       coverage: string;
     }>;
     techniqueNames: Record<string, string>;
+    techniqueDataComponents: Record<string, Array<{ id: string; name: string }>>;
   } {
     if (!Array.isArray(techniqueIds)) {
       throw new TypeError('techniqueIds must be an array');
@@ -1327,6 +1328,7 @@ export class MitreKnowledgeGraph {
         dataComponents: [],
         carAnalytics: [],
         techniqueNames: {},
+        techniqueDataComponents: {},
       };
     }
 
@@ -1509,14 +1511,41 @@ export class MitreKnowledgeGraph {
     }));
 
     const techniqueNames: Record<string, string> = {};
+    const techniqueDataComponents: Record<string, Array<{ id: string; name: string }>> = {};
+
+    // Build DC name → info lookup for resolving x_mitre_data_sources
+    const dcNameIndex = new Map<string, { id: string; name: string }>();
+    this.dataComponentMap.forEach((dc) => {
+      const key = this.normalizeName(dc.name);
+      if (!dcNameIndex.has(key)) {
+        dcNameIndex.set(key, { id: dc.id, name: dc.name });
+      }
+    });
+
     for (const techId of sanitizedIds) {
       const tech = this.getTechnique(techId);
       if (tech) {
         techniqueNames[techId.toUpperCase()] = tech.name;
+
+        // Derive data components from x_mitre_data_sources (e.g. "Process: Process Creation")
+        const dcRefs: Array<{ id: string; name: string }> = [];
+        const seen = new Set<string>();
+        for (const ds of tech.dataSources) {
+          const dcName = this.extractDataComponentName(ds);
+          if (!dcName || seen.has(dcName)) continue;
+          seen.add(dcName);
+          const dcInfo = dcNameIndex.get(dcName);
+          if (dcInfo) {
+            dcRefs.push(dcInfo);
+          }
+        }
+        if (dcRefs.length > 0) {
+          techniqueDataComponents[techId.toUpperCase()] = dcRefs;
+        }
       }
     }
-    
-    return { detectionStrategies: strategies, dataComponents, carAnalytics, techniqueNames };
+
+    return { detectionStrategies: strategies, dataComponents, carAnalytics, techniqueNames, techniqueDataComponents };
   }
 
   getStats(): { techniques: number; strategies: number; analytics: number; dataComponents: number; dataSources: number } {
@@ -1994,6 +2023,99 @@ export class MitreKnowledgeGraph {
    */
   getAllDataComponents(): DataComponentInfo[] {
     return Array.from(this.dataComponentMap.values());
+  }
+
+  /**
+   * Build a reverse map from analytics log source metadata:
+   * Data Component -> unique log sources (with frequency + platform context).
+   *
+   * This is intended for persistence in `data_components.log_sources` so the
+   * wizard can load log source hints without traversing the graph per request.
+   */
+  getDataComponentLogSourcesFromAnalytics(): Array<{
+    dataComponentId: string;
+    dataComponentName: string;
+    logSources: Array<{
+      name: string;
+      channel?: string;
+      frequency: number;
+      platforms: string[];
+    }>;
+  }> {
+    const aggregates = new Map<string, {
+      dataComponentId: string;
+      dataComponentName: string;
+      logSources: Map<string, {
+        name: string;
+        channel?: string;
+        frequency: number;
+        platforms: Set<string>;
+      }>;
+    }>();
+
+    this.dataComponentMap.forEach((dc, stixId) => {
+      aggregates.set(stixId, {
+        dataComponentId: dc.id,
+        dataComponentName: dc.name,
+        logSources: new Map(),
+      });
+    });
+
+    this.analyticMap.forEach((analytic) => {
+      const analyticPlatforms = normalizePlatformList(
+        Array.isArray(analytic.platforms) ? analytic.platforms : []
+      );
+      const seenInAnalytic = new Set<string>();
+
+      for (const ref of analytic.logSourceReferences) {
+        if (!ref || !ref.dataComponentRef) continue;
+        const name = typeof ref.name === "string" ? ref.name.trim() : "";
+        if (!name) continue;
+
+        const targetDc = aggregates.get(ref.dataComponentRef);
+        if (!targetDc) continue;
+
+        const channel = typeof ref.channel === "string" ? ref.channel.trim() : "";
+        const normalizedChannel = channel || undefined;
+        const sourceKey = `${name.toLowerCase()}|${(normalizedChannel || "").toLowerCase()}`;
+        const dedupeKey = `${ref.dataComponentRef}|${sourceKey}`;
+        if (seenInAnalytic.has(dedupeKey)) continue;
+        seenInAnalytic.add(dedupeKey);
+
+        let source = targetDc.logSources.get(sourceKey);
+        if (!source) {
+          source = {
+            name,
+            channel: normalizedChannel,
+            frequency: 0,
+            platforms: new Set<string>(),
+          };
+          targetDc.logSources.set(sourceKey, source);
+        }
+
+        source.frequency += 1;
+        analyticPlatforms.forEach((platform) => source!.platforms.add(platform));
+      }
+    });
+
+    return Array.from(aggregates.values())
+      .map((entry) => ({
+        dataComponentId: entry.dataComponentId,
+        dataComponentName: entry.dataComponentName,
+        logSources: Array.from(entry.logSources.values())
+          .map((source) => ({
+            name: source.name,
+            channel: source.channel,
+            frequency: source.frequency,
+            platforms: Array.from(source.platforms).sort((a, b) => a.localeCompare(b)),
+          }))
+          .sort((a, b) => {
+            const frequencyDelta = b.frequency - a.frequency;
+            if (frequencyDelta !== 0) return frequencyDelta;
+            return a.name.localeCompare(b.name);
+          }),
+      }))
+      .sort((a, b) => a.dataComponentId.localeCompare(b.dataComponentId));
   }
 
   /**

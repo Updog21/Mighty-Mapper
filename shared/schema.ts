@@ -75,6 +75,21 @@ export const detectionStrategies = pgTable("detection_strategies", {
 });
 export const validationStatusEnum = ['pending', 'valid', 'invalid', 'uncertain'] as const;
 export type ValidationStatus = typeof validationStatusEnum[number];
+export const analyticEvidenceTierEnum = ['strong', 'medium', 'weak'] as const;
+export type AnalyticEvidenceTier = typeof analyticEvidenceTierEnum[number];
+export const analyticCoverageKindEnum = ['detect', 'visibility', 'candidate'] as const;
+export type AnalyticCoverageKind = typeof analyticCoverageKindEnum[number];
+export const analyticMappingMethodEnum = [
+  'explicit_attack_id',
+  'ctid_import',
+  'tactic_data_component_inference',
+  'source_hint_inference',
+  'stream_data_component_inference',
+  'mitre_keyword_match',
+] as const;
+export type AnalyticMappingMethod = typeof analyticMappingMethodEnum[number];
+export const ssmMappingTypeEnum = ['Protect', 'Detect', 'Respond', 'Observe'] as const;
+export type SsmMappingType = typeof ssmMappingTypeEnum[number];
 
 export const analytics = pgTable("analytics", {
   id: serial("id").primaryKey(),
@@ -131,9 +146,13 @@ export const productMappings = pgTable("product_mappings", {
   status: text("status").notNull(),
   confidence: integer("confidence"),
   detectionStrategyIds: text("detection_strategy_ids").array().default(sql`'{}'::text[]`),
+  publishedTechniqueIds: text("published_technique_ids").array().default(sql`'{}'::text[]`),
+  visibilityTechniqueIds: text("visibility_technique_ids").array().default(sql`'{}'::text[]`),
+  candidateAnalyticIds: text("candidate_analytic_ids").array().default(sql`'{}'::text[]`),
   analyticIds: text("analytic_ids").array().default(sql`'{}'::text[]`),
   dataComponentIds: text("data_component_ids").array().default(sql`'{}'::text[]`),
   rawMapping: jsonb("raw_mapping"),
+  versionMetadata: jsonb("version_metadata"),
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
@@ -158,6 +177,11 @@ export const ssmMappings = pgTable("ssm_mappings", {
   techniqueId: text("technique_id").notNull(),
   techniqueName: text("technique_name").notNull(),
   mappingType: text("mapping_type").notNull(),
+  coverageKind: text("coverage_kind").default('detect').notNull(),
+  evidenceTier: text("evidence_tier").default('medium').notNull(),
+  mappingMethod: text("mapping_method"),
+  validationStatus: text("validation_status"),
+  aiConfidence: integer("ai_confidence"),
   scoreCategory: text("score_category").notNull(),
   scoreValue: text("score_value").notNull(),
   comments: text("comments"),

@@ -23,6 +23,8 @@ const adapters: Record<ResourceType, ResourceAdapter> = {
 
 const COMMUNITY_RESOURCE_ORDER: ResourceType[] = ['ctid', 'splunk', 'sigma', 'elastic', 'azure', 'mitre_stix'];
 const AUTO_MAPPER_CONCURRENCY = 2;
+const AUTO_MAPPER_PIPELINE_VERSION = '2026-03-13-quality-phase1-v1';
+const GRAPH_DATASET_VERSION = '18.1';
 
 const SSM_SOURCE_MAP: Record<ResourceType, string> = {
   ctid: 'ctid_import',
@@ -63,6 +65,157 @@ interface CTIDRawMapping {
   score_category?: string;
   score_value?: string;
 }
+
+interface MappingVersionMetadata {
+  resourceType: ResourceType;
+  pipelineVersion: string;
+  graphDatasetVersion: string;
+  sourceSnapshot: string;
+}
+
+const buildMappingVersionMetadata = (resourceType: ResourceType): MappingVersionMetadata => ({
+  resourceType,
+  pipelineVersion: AUTO_MAPPER_PIPELINE_VERSION,
+  graphDatasetVersion: GRAPH_DATASET_VERSION,
+  sourceSnapshot: resourceType === 'mitre_stix'
+    ? 'mitre-attack/master-enterprise-attack.json'
+    : 'local-repo-or-graph-hydrated',
+});
+
+const mappingVersionMatches = (
+  stored: unknown,
+  expected: MappingVersionMetadata
+): boolean => {
+  if (!stored || typeof stored !== 'object') return false;
+  const record = stored as Partial<MappingVersionMetadata>;
+  return record.resourceType === expected.resourceType
+    && record.pipelineVersion === expected.pipelineVersion
+    && record.graphDatasetVersion === expected.graphDatasetVersion
+    && record.sourceSnapshot === expected.sourceSnapshot;
+};
+
+const coverageKindRank: Record<NonNullable<AnalyticMapping['coverageKind']>, number> = {
+  candidate: 0,
+  visibility: 1,
+  detect: 2,
+};
+
+const evidenceTierWeight: Record<NonNullable<AnalyticMapping['evidenceTier']>, number> = {
+  weak: 0.35,
+  medium: 0.7,
+  strong: 1,
+};
+
+const getAnalyticCoverageKind = (analytic: AnalyticMapping): NonNullable<AnalyticMapping['coverageKind']> => {
+  if (analytic.coverageKind) return analytic.coverageKind;
+  const metadata = (analytic.metadata || {}) as Record<string, unknown>;
+  if (metadata.coverage_kind === 'detect' || metadata.coverage_kind === 'visibility' || metadata.coverage_kind === 'candidate') {
+    return metadata.coverage_kind as NonNullable<AnalyticMapping['coverageKind']>;
+  }
+  if (metadata.coverage_type === 'telemetry') {
+    return 'visibility';
+  }
+  return (analytic.techniqueIds || []).length > 0 ? 'detect' : 'candidate';
+};
+
+const getAnalyticEvidenceTier = (analytic: AnalyticMapping): NonNullable<AnalyticMapping['evidenceTier']> => {
+  if (analytic.evidenceTier) return analytic.evidenceTier;
+  const metadata = (analytic.metadata || {}) as Record<string, unknown>;
+  if (metadata.evidence_tier === 'strong' || metadata.evidence_tier === 'medium' || metadata.evidence_tier === 'weak') {
+    return metadata.evidence_tier as NonNullable<AnalyticMapping['evidenceTier']>;
+  }
+  const coverageKind = getAnalyticCoverageKind(analytic);
+  if (coverageKind === 'detect') return 'strong';
+  if (coverageKind === 'visibility') return 'medium';
+  return 'weak';
+};
+
+const getAnalyticMappingMethod = (analytic: AnalyticMapping): NonNullable<AnalyticMapping['mappingMethod']> => {
+  if (analytic.mappingMethod) return analytic.mappingMethod;
+  const metadata = (analytic.metadata || {}) as Record<string, unknown>;
+  if (
+    metadata.mapping_method === 'explicit_attack_id'
+    || metadata.mapping_method === 'ctid_import'
+    || metadata.mapping_method === 'tactic_data_component_inference'
+    || metadata.mapping_method === 'source_hint_inference'
+    || metadata.mapping_method === 'stream_data_component_inference'
+    || metadata.mapping_method === 'mitre_keyword_match'
+  ) {
+    return metadata.mapping_method as NonNullable<AnalyticMapping['mappingMethod']>;
+  }
+  return (analytic.techniqueIds || []).length > 0 ? 'explicit_attack_id' : 'mitre_keyword_match';
+};
+
+const withAnalyticProvenance = (
+  analytic: AnalyticMapping,
+  overrides: Partial<Pick<AnalyticMapping, 'coverageKind' | 'evidenceTier' | 'mappingMethod' | 'requiresValidation'>> = {}
+): AnalyticMapping => {
+  const coverageKind = overrides.coverageKind || getAnalyticCoverageKind(analytic);
+  const evidenceTier = overrides.evidenceTier || getAnalyticEvidenceTier(analytic);
+  const mappingMethod = overrides.mappingMethod || getAnalyticMappingMethod(analytic);
+  const requiresValidation = overrides.requiresValidation ?? analytic.requiresValidation;
+
+  return {
+    ...analytic,
+    coverageKind,
+    evidenceTier,
+    mappingMethod,
+    requiresValidation,
+    metadata: {
+      ...(analytic.metadata || {}),
+      mapping_method: mappingMethod,
+      evidence_tier: evidenceTier,
+      coverage_kind: coverageKind,
+      requires_validation: requiresValidation,
+    },
+  };
+};
+
+const isDetectAnalytic = (analytic: AnalyticMapping): boolean =>
+  (analytic.techniqueIds || []).length > 0
+  && getAnalyticCoverageKind(analytic) === 'detect';
+
+const isVisibilityAnalytic = (analytic: AnalyticMapping): boolean =>
+  (analytic.techniqueIds || []).length > 0
+  && getAnalyticCoverageKind(analytic) === 'visibility';
+
+const hasPublishedTechniqueCoverage = (mapping: NormalizedMapping): boolean =>
+  mapping.detectionStrategies.length > 0 || mapping.analytics.some(isDetectAnalytic);
+
+const validationWeight = (analytic: AnalyticMapping): number => {
+  switch (analytic.validationStatus) {
+    case 'invalid':
+      return 0;
+    case 'uncertain':
+      return 0.75;
+    case 'valid':
+      return 1.05;
+    default:
+      return 0.9;
+  }
+};
+
+const calculatePublishedConfidence = (
+  analytics: AnalyticMapping[],
+  sources: ResourceType[]
+): number => {
+  const publishedAnalytics = analytics
+    .filter(isDetectAnalytic)
+    .filter((analytic) => analytic.validationStatus !== 'invalid');
+
+  if (publishedAnalytics.length === 0) {
+    return 0;
+  }
+
+  const weightedEvidence = publishedAnalytics.reduce((total, analytic) => (
+    total + evidenceTierWeight[getAnalyticEvidenceTier(analytic)] * validationWeight(analytic)
+  ), 0);
+  const averageEvidence = weightedEvidence / publishedAnalytics.length;
+  const breadthScore = Math.min(20, publishedAnalytics.length * 3);
+  const sourceScore = Math.min(15, sources.length * 5);
+
+  return Math.min(100, Math.round(35 + averageEvidence * 30 + breadthScore + sourceScore));
+};
 
 export async function runAutoMapper(productId: string): Promise<MappingResult> {
   const product = await db.select().from(products).where(eq(products.productId, productId)).limit(1);
@@ -131,16 +284,16 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
           return [];
         }
         if (!isTrustedSource) {
-          return [{
+          return [withAnalyticProvenance({
             ...analytic,
             streamStatus: 'heuristic' as const,
             metadata: {
               ...(analytic.metadata || {}),
               stream_status: 'heuristic',
             },
-          }];
+          })];
         }
-        return [analytic];
+        return [withAnalyticProvenance(analytic)];
       }
 
       const lookupKey = rawSource.toLowerCase();
@@ -180,13 +333,17 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
             inferredMetadata.stream_inferred_techniques = Array.from(inferredTechniques);
           }
 
-          return [{
+          return [withAnalyticProvenance({
             ...analytic,
             rawSource,
             techniqueIds: finalTechniqueIds,
             streamStatus: 'verified' as const,
             metadata: inferredMetadata,
-          }];
+          }, !hasTechniques ? {
+            coverageKind: 'visibility',
+            evidenceTier: 'medium',
+            mappingMethod: 'stream_data_component_inference',
+          } : {})];
         }
       }
 
@@ -194,7 +351,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
         pendingStreamStubs.set(lookupKey, rawSource);
       }
 
-      return [{
+      return [withAnalyticProvenance({
         ...analytic,
         rawSource,
         streamStatus: (isTrustedSource ? undefined : 'heuristic') as 'heuristic' | undefined,
@@ -204,11 +361,11 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
           stream_status: isTrustedSource ? undefined : 'heuristic',
           stream_ref: stream?.id,
         },
-      }];
+      })];
     });
 
     const techniqueSet = new Set<string>();
-    for (const analytic of updatedAnalytics) {
+    for (const analytic of updatedAnalytics.filter(isDetectAnalytic)) {
       for (const techId of analytic.techniqueIds || []) {
         techniqueSet.add(techId);
       }
@@ -241,42 +398,43 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
   );
 
   const allMappings: NormalizedMapping[] = [];
+  const partialMappings: NormalizedMapping[] = [];
   const successfulSources: ResourceType[] = [];
+  const partialSources: ResourceType[] = [];
   const results = await runWithConcurrency(
     COMMUNITY_RESOURCE_ORDER,
     AUTO_MAPPER_CONCURRENCY,
     async (resourceType) => {
       const adapter = adapters[resourceType];
+      const versionMetadata = buildMappingVersionMetadata(resourceType);
       try {
-        const cached = await getCachedMapping(productId, resourceType);
+        const cached = await getCachedMapping(productId, resourceType, versionMetadata);
         if (cached) {
           resolveMappingStreams(resourceType, cached);
-          if (cached.analytics.length > 0) {
-            await saveMappingResult(productId, resourceType, 'matched', cached);
-            return { resourceType, mapping: cached, matched: true };
+          if (cached.analytics.length > 0 || cached.dataComponents.length > 0) {
+            const status = hasPublishedTechniqueCoverage(cached) ? 'matched' : 'partial';
+            await saveMappingResult(productId, resourceType, status, cached, versionMetadata);
+            return { resourceType, mapping: cached, matched: status === 'matched' };
           }
-          await saveMappingResult(productId, resourceType, 'not_found', null);
+          await saveMappingResult(productId, resourceType, 'not_found', null, versionMetadata);
           return { resourceType, mapping: null, matched: false };
         }
 
         const mapping = await adapter.fetchMappings(productName, vendor);
 
-        if (mapping && mapping.analytics.length > 0) {
+        if (mapping && (mapping.analytics.length > 0 || mapping.dataComponents.length > 0)) {
           resolveMappingStreams(resourceType, mapping);
-          if (mapping.analytics.length === 0) {
-            await saveMappingResult(productId, resourceType, 'not_found', null);
-            return { resourceType, mapping: null, matched: false };
-          }
           if (resourceType === 'sigma' || resourceType === 'splunk') {
             console.log(`[AutoMapper] Validating ${mapping.analytics.length} rules for ${resourceType}...`);
             await validateAnalytics(mapping.analytics, productName);
           }
 
-          await saveMappingResult(productId, resourceType, 'matched', mapping);
-          return { resourceType, mapping, matched: true };
+          const status = hasPublishedTechniqueCoverage(mapping) ? 'matched' : 'partial';
+          await saveMappingResult(productId, resourceType, status, mapping, versionMetadata);
+          return { resourceType, mapping, matched: status === 'matched' };
         }
 
-        await saveMappingResult(productId, resourceType, 'not_found', null);
+        await saveMappingResult(productId, resourceType, 'not_found', null, versionMetadata);
         return { resourceType, mapping: null, matched: false };
       } catch (error) {
         console.error(`Error fetching from ${resourceType}:`, error);
@@ -291,6 +449,9 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
     if (result?.mapping && result.matched) {
       allMappings.push(result.mapping);
       successfulSources.push(resourceType);
+    } else if (result?.mapping) {
+      partialMappings.push(result.mapping);
+      partialSources.push(resourceType);
     }
   }
 
@@ -319,8 +480,19 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
       );
       if (relevantRules.length === 0) continue;
 
-      const telemetryRules = relevantRules.filter(rule => (rule.metadata as any)?.coverage_type === 'telemetry');
-      const detectionRules = relevantRules.filter(rule => (rule.metadata as any)?.coverage_type !== 'telemetry');
+      const detectionRules = relevantRules.filter(rule =>
+        isDetectAnalytic(rule) && rule.validationStatus !== 'invalid'
+      );
+      const telemetryRules = relevantRules.filter(rule =>
+        isVisibilityAnalytic(rule)
+        && (rule.metadata as any)?.coverage_type === 'telemetry'
+        && rule.validationStatus !== 'invalid'
+      );
+      const visibilityRules = relevantRules.filter(rule =>
+        isVisibilityAnalytic(rule)
+        && (rule.metadata as any)?.coverage_type !== 'telemetry'
+        && rule.validationStatus !== 'invalid'
+      );
 
       if (detectionRules.length > 0) {
         const [capability] = await db.insert(ssmCapabilities).values({
@@ -344,6 +516,11 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
             query: rule.query,
             raw_source: rule.rawSource,
             stream_status: rule.streamStatus,
+            mapping_method: rule.mappingMethod,
+            evidence_tier: rule.evidenceTier,
+            coverage_kind: rule.coverageKind,
+            validation_status: rule.validationStatus,
+            ai_confidence: rule.aiConfidence,
             ...(rule.metadata || {}),
           };
 
@@ -355,6 +532,11 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
               techniqueId: normalizedId,
               techniqueName: techniqueNameMap.get(normalizedId) || techId || normalizedId,
               mappingType: 'Detect',
+              coverageKind: 'detect',
+              evidenceTier: rule.evidenceTier || 'strong',
+              mappingMethod: rule.mappingMethod || 'explicit_attack_id',
+              validationStatus: rule.validationStatus || null,
+              aiConfidence: rule.aiConfidence || null,
               scoreCategory: 'Partial',
               scoreValue,
               comments,
@@ -390,6 +572,11 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
             query: rule.query,
             raw_source: rule.rawSource,
             stream_status: rule.streamStatus,
+            mapping_method: rule.mappingMethod,
+            evidence_tier: rule.evidenceTier,
+            coverage_kind: rule.coverageKind,
+            validation_status: rule.validationStatus,
+            ai_confidence: rule.aiConfidence,
             ...(rule.metadata || {}),
           };
 
@@ -400,7 +587,68 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
               capabilityId: capability.id,
               techniqueId: normalizedId,
               techniqueName: techniqueNameMap.get(normalizedId) || techId || normalizedId,
-              mappingType: 'Detect',
+              mappingType: 'Observe',
+              coverageKind: 'visibility',
+              evidenceTier: rule.evidenceTier || 'medium',
+              mappingMethod: rule.mappingMethod || 'stream_data_component_inference',
+              validationStatus: rule.validationStatus || null,
+              aiConfidence: rule.aiConfidence || null,
+              scoreCategory: 'Minimal',
+              scoreValue,
+              comments,
+              metadata,
+            });
+          }
+        }
+
+        if (mappingsToInsert.length > 0) {
+          await db.insert(ssmMappings).values(mappingsToInsert);
+        }
+      }
+
+      if (visibilityRules.length > 0) {
+        const [capability] = await db.insert(ssmCapabilities).values({
+          productId,
+          capabilityGroupId: `${ssmSource}_visibility_${slugifyPlatform(platform)}_${productId}`,
+          name: `Community Visibility - ${sourceLabel} (${platform})`,
+          description: `Technique associations inferred from ${sourceLabel}; review before promotion.`,
+          platform,
+          source: ssmSource,
+        }).returning();
+
+        const mappingsToInsert = [];
+        for (const rule of visibilityRules) {
+          const techniqueIds = rule.techniqueIds || [];
+          const scoreValue = `Inference: ${rule.name || rule.sourceFile || rule.ruleId || 'Unknown Rule'}`;
+          const commentsBase = `Repo: ${rule.repoName || sourceLabel} | Inferred coverage`;
+          const comments = rule.ruleId ? `${commentsBase} | RuleID: ${rule.ruleId}` : commentsBase;
+          const metadata = {
+            log_sources: rule.logSources,
+            mutable_elements: rule.mutableElements,
+            query: rule.query,
+            raw_source: rule.rawSource,
+            stream_status: rule.streamStatus,
+            mapping_method: rule.mappingMethod,
+            evidence_tier: rule.evidenceTier,
+            coverage_kind: rule.coverageKind,
+            validation_status: rule.validationStatus,
+            ai_confidence: rule.aiConfidence,
+            ...(rule.metadata || {}),
+          };
+
+          for (const techId of techniqueIds) {
+            const normalizedId = normalizeTechniqueId(techId);
+            if (!normalizedId) continue;
+            mappingsToInsert.push({
+              capabilityId: capability.id,
+              techniqueId: normalizedId,
+              techniqueName: techniqueNameMap.get(normalizedId) || techId || normalizedId,
+              mappingType: 'Observe',
+              coverageKind: 'visibility',
+              evidenceTier: rule.evidenceTier || 'weak',
+              mappingMethod: rule.mappingMethod || 'source_hint_inference',
+              validationStatus: rule.validationStatus || null,
+              aiConfidence: rule.aiConfidence || null,
               scoreCategory: 'Minimal',
               scoreValue,
               comments,
@@ -479,6 +727,11 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
           techniqueId: techId,
           techniqueName: techniqueNameMap.get(techId) || rule.attack_object_name || techId,
           mappingType: rule.mapping_type || 'Detect',
+          coverageKind: analytic?.coverageKind || 'detect',
+          evidenceTier: analytic?.evidenceTier || 'strong',
+          mappingMethod: analytic?.mappingMethod || 'ctid_import',
+          validationStatus: analytic?.validationStatus || null,
+          aiConfidence: analytic?.aiConfidence || null,
           scoreCategory: rule.score_category || 'Significant',
           scoreValue,
           comments,
@@ -494,16 +747,36 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
 
   for (const resourceType of COMMUNITY_RESOURCE_ORDER) {
     const result = resultsByType.get(resourceType);
-    if (!result?.mapping || !result.matched) continue;
+    if (!result?.mapping) continue;
     if (resourceType === 'ctid') {
-      await writeCtidSSM(result.mapping);
+      if (result.matched) {
+        await writeCtidSSM(result.mapping);
+      }
     } else {
       await writeCommunitySSM(resourceType, result.mapping.analytics);
     }
   }
 
   if (allMappings.length === 0) {
-    await saveMappingResult(productId, 'mitre_stix', 'ai_pending', null);
+    if (partialMappings.length > 0) {
+      const partialMapping = combineAllMappings(productId, partialMappings, partialSources);
+      return {
+        productId,
+        status: 'partial',
+        source: partialSources[0],
+        sources: partialSources,
+        confidence: partialMapping.confidence,
+        mapping: partialMapping,
+      };
+    }
+
+    await saveMappingResult(
+      productId,
+      'mitre_stix',
+      'ai_pending',
+      null,
+      buildMappingVersionMetadata('mitre_stix')
+    );
     
     return {
       productId,
@@ -512,13 +785,18 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
     };
   }
 
-  const combinedMapping = combineAllMappings(productId, allMappings, successfulSources);
+  const combinedSources = Array.from(new Set([...successfulSources, ...partialSources]));
+  const combinedMapping = combineAllMappings(
+    productId,
+    [...allMappings, ...partialMappings],
+    successfulSources
+  );
   
   return {
     productId,
     status: 'matched',
     source: successfulSources[0],
-    sources: successfulSources,
+    sources: combinedSources,
     confidence: combinedMapping.confidence,
     mapping: combinedMapping,
   };
@@ -553,7 +831,9 @@ async function validateAnalytics(analytics: AnalyticMapping[], productName: stri
 
   // Validate only the first 5 to save tokens/time for now
   // In a production job queue, we would do all.
-  const batch = analytics.slice(0, 5);
+  const batch = analytics
+    .filter((analytic) => analytic.requiresValidation ?? isDetectAnalytic(analytic))
+    .slice(0, 5);
 
   for (const analytic of batch) {
     try {
@@ -607,19 +887,38 @@ function combineAllMappings(
     for (const analytic of mapping.analytics) {
       const existing = analyticsMap.get(analytic.id);
       if (!existing) {
-        analyticsMap.set(analytic.id, analytic);
+        analyticsMap.set(analytic.id, withAnalyticProvenance(analytic));
         continue;
       }
-      if (analytic.techniqueIds && analytic.techniqueIds.length > 0) {
-        const combined = Array.from(new Set([
-          ...(existing.techniqueIds || []),
-          ...analytic.techniqueIds,
-        ]));
-        analyticsMap.set(analytic.id, {
-          ...existing,
-          techniqueIds: combined,
-        });
-      }
+      const combined = Array.from(new Set([
+        ...(existing.techniqueIds || []),
+        ...(analytic.techniqueIds || []),
+      ]));
+      const existingCoverageKind = getAnalyticCoverageKind(existing);
+      const nextCoverageKind = getAnalyticCoverageKind(analytic);
+      const chosenCoverageKind = coverageKindRank[nextCoverageKind] > coverageKindRank[existingCoverageKind]
+        ? nextCoverageKind
+        : existingCoverageKind;
+      const chosenEvidenceTier = evidenceTierWeight[getAnalyticEvidenceTier(analytic)] > evidenceTierWeight[getAnalyticEvidenceTier(existing)]
+        ? getAnalyticEvidenceTier(analytic)
+        : getAnalyticEvidenceTier(existing);
+
+      analyticsMap.set(analytic.id, withAnalyticProvenance({
+        ...existing,
+        ...analytic,
+        techniqueIds: combined,
+        validationStatus: analytic.validationStatus === 'valid'
+          ? analytic.validationStatus
+          : existing.validationStatus,
+        aiConfidence: Math.max(existing.aiConfidence || 0, analytic.aiConfidence || 0) || undefined,
+      }, {
+        coverageKind: chosenCoverageKind,
+        evidenceTier: chosenEvidenceTier,
+        mappingMethod: coverageKindRank[nextCoverageKind] >= coverageKindRank[existingCoverageKind]
+          ? getAnalyticMappingMethod(analytic)
+          : getAnalyticMappingMethod(existing),
+        requiresValidation: (existing.requiresValidation || analytic.requiresValidation) ?? undefined,
+      }));
     }
     
     for (const dc of mapping.dataComponents) {
@@ -633,8 +932,7 @@ function combineAllMappings(
     }
   }
 
-  const totalAnalytics = Array.from(analyticsMap.values()).length;
-  const confidence = Math.min(100, totalAnalytics * 5 + sources.length * 10);
+  const confidence = calculatePublishedConfidence(Array.from(analyticsMap.values()), sources);
 
   return {
     productId,
@@ -648,19 +946,23 @@ function combineAllMappings(
   };
 }
 
-async function getCachedMapping(productId: string, resourceType: ResourceType): Promise<NormalizedMapping | null> {
+async function getCachedMapping(
+  productId: string,
+  resourceType: ResourceType,
+  expectedVersion: MappingVersionMetadata
+): Promise<NormalizedMapping | null> {
   const cached = await db.select()
     .from(productMappings)
     .where(
       and(
         eq(productMappings.productId, productId),
         eq(productMappings.resourceType, resourceType),
-        eq(productMappings.status, 'matched')
+        inArray(productMappings.status, ['matched', 'partial'])
       )
     )
     .limit(1);
 
-  if (cached[0] && cached[0].rawMapping) {
+  if (cached[0] && cached[0].rawMapping && mappingVersionMatches(cached[0].versionMetadata, expectedVersion)) {
     return cached[0].rawMapping as NormalizedMapping;
   }
 
@@ -671,7 +973,8 @@ async function saveMappingResult(
   productId: string, 
   resourceType: ResourceType, 
   status: string, 
-  mapping: NormalizedMapping | null
+  mapping: NormalizedMapping | null,
+  versionMetadata: MappingVersionMetadata
 ): Promise<void> {
   const existing = await db.select()
     .from(productMappings)
@@ -689,9 +992,21 @@ async function saveMappingResult(
     status,
     confidence: mapping?.confidence || null,
     detectionStrategyIds: mapping?.detectionStrategies || [],
+    publishedTechniqueIds: mapping?.analytics
+      .filter(isDetectAnalytic)
+      .flatMap((analytic) => analytic.techniqueIds || [])
+      .filter((value, index, arr) => arr.indexOf(value) === index) || [],
+    visibilityTechniqueIds: mapping?.analytics
+      .filter(isVisibilityAnalytic)
+      .flatMap((analytic) => analytic.techniqueIds || [])
+      .filter((value, index, arr) => arr.indexOf(value) === index) || [],
+    candidateAnalyticIds: mapping?.analytics
+      .filter((analytic) => getAnalyticCoverageKind(analytic) === 'candidate')
+      .map((analytic) => analytic.id) || [],
     analyticIds: mapping?.analytics.map(a => a.id) || [],
     dataComponentIds: mapping?.dataComponents.map(dc => dc.id) || [],
     rawMapping: mapping,
+    versionMetadata,
     updatedAt: new Date(),
   };
 
@@ -713,10 +1028,36 @@ export async function getMappingStatus(productId: string): Promise<MappingResult
     return null;
   }
 
-  const matchedMappings = allMappings.filter(m => m.status === 'matched' && m.rawMapping);
+  const currentMappings = allMappings.filter((mapping) =>
+    mappingVersionMatches(
+      mapping.versionMetadata,
+      buildMappingVersionMetadata(mapping.resourceType as ResourceType)
+    )
+  );
+
+  if (currentMappings.length === 0) {
+    return null;
+  }
+
+  const matchedMappings = currentMappings.filter(m => m.status === 'matched' && m.rawMapping);
   
   if (matchedMappings.length === 0) {
-    const firstMapping = allMappings[0];
+    const partialMappings = currentMappings.filter(m => m.status === 'partial' && m.rawMapping);
+    if (partialMappings.length > 0) {
+      const sources = partialMappings.map(m => m.resourceType as ResourceType);
+      const normalizedMappings = partialMappings.map(m => m.rawMapping as NormalizedMapping);
+      const combinedMapping = combineAllMappings(productId, normalizedMappings, sources);
+      return {
+        productId,
+        status: 'partial',
+        source: sources[0],
+        sources,
+        confidence: combinedMapping.confidence,
+        mapping: combinedMapping,
+      };
+    }
+
+    const firstMapping = currentMappings[0];
     return {
       productId,
       status: firstMapping.status as MappingResult['status'],
@@ -724,14 +1065,20 @@ export async function getMappingStatus(productId: string): Promise<MappingResult
     };
   }
 
-  const sources = matchedMappings.map(m => m.resourceType as ResourceType);
-  const normalizedMappings = matchedMappings.map(m => m.rawMapping as NormalizedMapping);
-  const combinedMapping = combineAllMappings(productId, normalizedMappings, sources);
+  const partialMappings = currentMappings.filter(m => m.status === 'partial' && m.rawMapping);
+  const publishedSources = matchedMappings.map(m => m.resourceType as ResourceType);
+  const partialSources = partialMappings.map(m => m.resourceType as ResourceType);
+  const sources = Array.from(new Set([...publishedSources, ...partialSources]));
+  const normalizedMappings = [
+    ...matchedMappings.map(m => m.rawMapping as NormalizedMapping),
+    ...partialMappings.map(m => m.rawMapping as NormalizedMapping),
+  ];
+  const combinedMapping = combineAllMappings(productId, normalizedMappings, publishedSources);
 
   return {
     productId,
     status: 'matched',
-    source: sources[0],
+    source: publishedSources[0],
     sources,
     confidence: combinedMapping.confidence,
     mapping: combinedMapping,

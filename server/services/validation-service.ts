@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
+import { buildGroundedConfig } from "./gemini-config";
 
 // Interface for AI Providers
 export interface AIProvider {
@@ -59,6 +60,7 @@ export class GeminiProvider implements AIProvider {
       const response = await this.client.models.generateContent({
         model: this.modelName,
         contents: prompt,
+        config: await buildGroundedConfig() as any,
       });
       const text = typeof (response as any).text === "function"
         ? await (response as any).text()

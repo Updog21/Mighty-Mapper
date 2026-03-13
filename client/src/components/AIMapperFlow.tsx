@@ -151,6 +151,8 @@ interface CreatedProduct {
   productId: string;
 }
 
+const WIZARD_DRAFT_SOURCE = 'wizard_draft';
+
 interface StreamDraft {
   name: string;
   streamType: 'log' | 'alert' | 'finding' | 'inventory';
@@ -357,7 +359,7 @@ async function createProduct(payload: {
   description: string;
   platforms: string[];
   dataComponentIds: string[];
-  source: 'custom';
+  source: 'custom' | 'wizard_draft';
 }) {
   const response = await fetch('/api/admin/products?autoMap=false', {
     method: 'POST',
@@ -390,6 +392,29 @@ async function addAlias(productDbId: number, alias: string) {
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to add alias');
+  }
+  return response.json();
+}
+
+async function updateProduct(
+  productId: string,
+  payload: Partial<{
+    vendor: string;
+    productName: string;
+    description: string;
+    platforms: string[];
+    dataComponentIds: string[];
+    source: 'custom' | 'wizard_draft';
+  }>
+) {
+  const response = await fetch(`/api/admin/products/${encodeURIComponent(productId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error((error as { error?: string }).error || 'Failed to update product');
   }
   return response.json();
 }
@@ -831,6 +856,9 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
   const [wantsEvidence, setWantsEvidence] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [createdProductId, setCreatedProductId] = useState<string | null>(null);
+  const [createdProductDbId, setCreatedProductDbId] = useState<number | null>(null);
+  const [productFinalized, setProductFinalized] = useState<boolean>(Boolean(isEvidenceOnly && existingProductId));
+  const [finalizingProduct, setFinalizingProduct] = useState(false);
   const [progressMessage, setProgressMessage] = useState('Preparing mapping...');
   const [suggestionsApplied, setSuggestionsApplied] = useState(false);
   const [suggestionsAppliedForInput, setSuggestionsAppliedForInput] = useState('');
@@ -909,6 +937,62 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     () => [vendor, product, description, ...aliases].join(' ').trim(),
     [vendor, product, description, aliases]
   );
+
+  const buildProductDraftPayload = () => {
+    const vendorTrimmed = vendor.trim();
+    const productTrimmed = product.trim();
+    const finalVendor = vendorTrimmed || productTrimmed;
+    const finalProduct = productTrimmed || vendorTrimmed;
+    return {
+      productId: buildProductId(finalVendor, finalProduct),
+      vendor: finalVendor,
+      productName: finalProduct,
+      description: description.trim(),
+      platforms: selectedPlatformsList,
+      dataComponentIds: selectedGuidedComponents,
+    };
+  };
+
+  const ensureDraftProduct = async (): Promise<CreatedProduct> => {
+    if (createdProductId && createdProductDbId !== null) {
+      return { id: createdProductDbId, productId: createdProductId };
+    }
+
+    const draftPayload = buildProductDraftPayload();
+    const createdProduct = await createProduct({
+      ...draftPayload,
+      source: WIZARD_DRAFT_SOURCE,
+    });
+
+    setCreatedProductId(createdProduct.productId);
+    setCreatedProductDbId(createdProduct.id);
+    setProductFinalized(false);
+
+    if (aliases.length > 0) {
+      await Promise.all(aliases.map(alias => addAlias(createdProduct.id, alias)));
+    }
+
+    return createdProduct;
+  };
+
+  const ensureProductFinalized = async (): Promise<string> => {
+    if (productFinalized && createdProductId) {
+      return createdProductId;
+    }
+
+    const draftProduct = await ensureDraftProduct();
+    const finalPayload = buildProductDraftPayload();
+    await updateProduct(draftProduct.productId, {
+      vendor: finalPayload.vendor,
+      productName: finalPayload.productName,
+      description: finalPayload.description,
+      platforms: finalPayload.platforms,
+      dataComponentIds: finalPayload.dataComponentIds,
+      source: 'custom',
+    });
+    setProductFinalized(true);
+    return draftProduct.productId;
+  };
   const heuristicSuggestedPlatforms = useMemo(
     () => getSuggestedPlatforms(platforms, suggestionInput),
     [platforms, suggestionInput]
@@ -1023,6 +1107,10 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           setSelectedPlatforms(new Set(normalizePlatformList(productData.platforms)));
         }
         setCreatedProductId(existingProductId);
+        if (typeof productData.id === 'number') {
+          setCreatedProductDbId(productData.id);
+        }
+        setProductFinalized(true);
         setStep('evidence');
         setProgressMessage('Preparing evidence prompts...');
         const ssm = await fetchProductSsm(existingProductId);
@@ -1566,14 +1654,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
         ...payload,
         suggestedPlatforms,
       });
-      
-      // Auto-select suggested platforms
-      if (suggestedPlatforms.length > 0) {
-        const newSelection = new Set(selectedPlatforms);
-        suggestedPlatforms.forEach((platform: string) => newSelection.add(platform));
-        setSelectedPlatforms(newSelection);
-      }
-      
+
       const validationCount = Array.isArray(payload.validation)
         ? payload.validation.length
         : 0;
@@ -1584,7 +1665,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       toast({
         title: 'Platform check complete',
         description: suggestedPlatforms.length > 0
-          ? `Suggested and selected ${suggestedPlatforms.length} platform${suggestedPlatforms.length === 1 ? '' : 's'} based on product documentation.`
+          ? `Suggested ${suggestedPlatforms.length} platform${suggestedPlatforms.length === 1 ? '' : 's'} based on product documentation. Review before selecting.`
           : validationCount > 0
             ? `Validated ${validationCount} platform${validationCount === 1 ? '' : 's'} with evidence.`
             : alternativeCount > 0
@@ -1795,6 +1876,55 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
     }
   };
 
+  const handleFinalizeToComplete = async () => {
+    if (finalizingProduct) return;
+
+    try {
+      setFinalizingProduct(true);
+      await ensureProductFinalized();
+      setStep('complete');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected error';
+      toast({
+        title: 'Failed to finalize product',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setFinalizingProduct(false);
+    }
+  };
+
+  const handleFinalizeAndView = async () => {
+    if (finalizingProduct) return;
+
+    try {
+      setFinalizingProduct(true);
+      const productId = await ensureProductFinalized();
+      onComplete(productId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected error';
+      toast({
+        title: 'Failed to finalize product',
+        description: message,
+        variant: 'destructive',
+      });
+    } finally {
+      setFinalizingProduct(false);
+    }
+  };
+
+  const handleCancelWizard = async () => {
+    if (!productFinalized && createdProductId) {
+      try {
+        await deleteProduct(createdProductId);
+      } catch (error) {
+        console.error('Failed to delete draft product on cancel', error);
+      }
+    }
+    onCancel();
+  };
+
   const handleConfirmResearchResults = async () => {
     if (!researchResults) {
       toast({
@@ -1804,18 +1934,11 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       });
       return;
     }
-    if (!createdProductId) {
-      toast({
-        title: 'Product not ready',
-        description: 'Create the product before confirming research results.',
-        variant: 'destructive',
-      });
-      return;
-    }
     if (researchConfirming) return;
 
     try {
       setResearchConfirming(true);
+      const draftProduct = await ensureDraftProduct();
       const now = new Date().toISOString();
       const enrichedResults = researchResults.results.map((entry) => ({
         data_component_id: entry.dcId,
@@ -1890,7 +2013,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       });
 
       setStreams(normalizedStreams);
-      await saveProductStreams(createdProductId, normalizedStreams);
+      await saveProductStreams(draftProduct.productId, normalizedStreams);
       toast({
         title: 'Evidence confirmed',
         description: 'Research evidence saved to product telemetry metadata.',
@@ -1949,28 +2072,21 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       });
       return;
     }
-    if (!createdProductId) {
-      toast({
-        title: 'Missing product ID',
-        description: 'Create the product before saving guided coverage.',
-        variant: 'destructive',
-      });
-      return;
-    }
     if (isSubmitting) return;
 
     try {
       setIsSubmitting(true);
+      const draftProduct = await ensureDraftProduct();
       const normalizedStreams = streams.map(stream => ({
         ...stream,
         name: stream.name.trim() || defaultEvidenceSourceName,
       }));
       setStreams(normalizedStreams);
-      await saveProductStreams(createdProductId, normalizedStreams);
+      await saveProductStreams(draftProduct.productId, normalizedStreams);
 
       const configuredStreams = normalizedStreams.filter(stream => stream.mappedDataComponents.length > 0);
       const summary = await saveWizardCoverage(
-        createdProductId,
+        draftProduct.productId,
         selectedPlatformsList,
         configuredStreams
       );
@@ -2004,26 +2120,8 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
 
     try {
       setProgressMessage('Creating product...');
-      const vendorTrimmed = vendor.trim();
-      const productTrimmed = product.trim();
-      const finalVendor = vendorTrimmed || productTrimmed;
-      const finalProduct = productTrimmed || vendorTrimmed;
-      const productId = buildProductId(finalVendor, finalProduct);
-      const createdProduct = await createProduct({
-        productId,
-        vendor: finalVendor,
-        productName: finalProduct,
-        description: description.trim(),
-        platforms: selectedPlatformsList,
-        dataComponentIds: [],
-        source: 'custom',
-      });
+      const createdProduct = await ensureDraftProduct();
       created = createdProduct;
-
-      if (aliases.length > 0) {
-        setProgressMessage('Saving aliases...');
-        await Promise.all(aliases.map(alias => addAlias(createdProduct.id, alias)));
-      }
 
       setProgressMessage('Saving evidence sources...');
       const normalizedStreams = streams.map(stream => ({
@@ -2038,6 +2136,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       const mappingResult = await waitForMapping(createdProduct.productId);
 
       setCreatedProductId(createdProduct.productId);
+      setCreatedProductDbId(createdProduct.id);
       setProgressMessage('Preparing evidence prompts...');
       const ssm = await fetchProductSsm(createdProduct.productId);
       setSsmCapabilities(ssm);
@@ -2077,7 +2176,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
 
       toast({
         title: 'Auto mapping complete',
-        description: `${product} has been created and mapped.`,
+        description: `${product} has been mapped and is ready for review.`,
       });
       const nextStep: Step = (techniqueIds.length < EVIDENCE_AUTO_THRESHOLD || wantsEvidence)
         ? 'streams'
@@ -2179,21 +2278,23 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           title: 'No evidence provided',
           description: 'No log sources were added. You can add them later.',
         });
+        const productId = await ensureProductFinalized();
         setStep('complete');
         setTimeout(() => {
-          onComplete(createdProductId);
+          onComplete(productId);
         }, 300);
         return;
       }
 
       await Promise.all(updates);
+      const productId = await ensureProductFinalized();
       toast({
         title: 'Evidence saved',
         description: `Saved evidence for ${savedTechniques} technique${savedTechniques === 1 ? '' : 's'}.`,
       });
       setStep('complete');
       setTimeout(() => {
-        onComplete(createdProductId);
+        onComplete(productId);
       }, 300);
     } catch (error) {
       console.error(error);
@@ -2288,7 +2389,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             {renderFooterSpacer()}
             {renderFixedFooter(
               <div className="flex gap-3">
-                <Button variant="secondary" onClick={onCancel} className="flex-1">
+                <Button variant="secondary" onClick={() => void handleCancelWizard()} className="flex-1">
                   Cancel
                 </Button>
                 <Button onClick={handleNextDetails} className="flex-1">
@@ -2400,7 +2501,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 ) : platformCheckHasRun ? (
                   'Re-run platform check'
                 ) : (
-                  selectedPlatforms.size === 0 ? 'Auto-select platforms with Gemini' : 'Validate platforms with Gemini'
+                  selectedPlatforms.size === 0 ? 'Suggest platforms with Gemini' : 'Validate platforms with Gemini'
                 )}
               </Button>
               {(platformCheckLoading || aiProgress.platformCheck > 0) && (
@@ -2421,7 +2522,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                   )}
                   {platformCheckResults?.suggestedPlatforms && platformCheckResults.suggestedPlatforms.length > 0 && (
                     <div className="text-xs text-blue-600">
-                      ✓ Suggested and auto-selected: {platformCheckResults.suggestedPlatforms.join(', ')}
+                      Suggested for review: {platformCheckResults.suggestedPlatforms.join(', ')}
                     </div>
                   )}
                   {platformCheckSummary?.supported && platformCheckSummary.supported.length > 0 && (
@@ -2929,13 +3030,13 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 variant="secondary"
                 size="sm"
                 onClick={handleConfirmResearchResults}
-                disabled={researchConfirming || !createdProductId}
+                disabled={researchConfirming}
               >
                 {researchConfirming ? 'Saving...' : 'Confirm evidence'}
               </Button>
               {!createdProductId && (
                 <span className="text-xs text-muted-foreground">
-                  Create the product before confirming evidence.
+                  A hidden draft will be created when you confirm evidence.
                 </span>
               )}
             </div>
@@ -3298,7 +3399,17 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 <Button variant="secondary" onClick={() => setStep('review')} className="flex-1">
                   Back
                 </Button>
-                <Button onClick={() => setStep(autoResultsNextStep)} className="flex-1">
+                <Button
+                  onClick={() => {
+                    if (autoResultsNextStep === 'streams') {
+                      setStep('streams');
+                      return;
+                    }
+                    void handleFinalizeToComplete();
+                  }}
+                  className="flex-1"
+                  disabled={finalizingProduct}
+                >
                   {autoResultsNextStep === 'streams' ? 'Continue to Telemetry' : 'Finish'}
                 </Button>
               </div>
@@ -3342,7 +3453,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="rounded-lg border border-dashed border-border/80 bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
-              Add evidence sources that satisfy the required data components for each technique. Use the
+              Add evidence sources that satisfy the mapped data components for each technique. Use the
               <span className="text-foreground font-medium"> Add Log Source </span>
               button to attach evidence. You can also skip this step and add evidence later from the product page.
             </div>
@@ -3386,8 +3497,13 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                   <Button variant="secondary" onClick={() => setEvidenceFormExpanded(true)} className="flex-1">
                     Start evidence entry
                   </Button>
-                  <Button variant="outline" onClick={() => setStep('complete')} className="flex-1">
-                    Skip for now
+                  <Button
+                    variant="outline"
+                    onClick={() => void handleFinalizeToComplete()}
+                    className="flex-1"
+                    disabled={finalizingProduct}
+                  >
+                    {finalizingProduct ? 'Finishing...' : 'Skip for now'}
                   </Button>
                 </div>
               </div>
@@ -3459,8 +3575,13 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                 {renderFooterSpacer()}
                 {renderFixedFooter(
                   <div className="flex gap-3">
-                    <Button variant="secondary" onClick={() => setStep('complete')} className="flex-1">
-                      Skip for now
+                    <Button
+                      variant="secondary"
+                      onClick={() => void handleFinalizeToComplete()}
+                      className="flex-1"
+                      disabled={isSubmitting || finalizingProduct}
+                    >
+                      {finalizingProduct ? 'Finishing...' : 'Skip for now'}
                     </Button>
                     <Button onClick={handleSaveEvidence} className="flex-1" disabled={isSubmitting}>
                       {isSubmitting ? 'Saving...' : 'Save & Continue'}
@@ -3535,11 +3656,11 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                   Back
                 </Button>
                 <Button
-                  onClick={() => createdProductId && onComplete(createdProductId)}
+                  onClick={() => void handleFinalizeAndView()}
                   className="flex-1"
-                  disabled={!createdProductId}
+                  disabled={finalizingProduct}
                 >
-                  View product
+                  {finalizingProduct ? 'Finalizing...' : 'View product'}
                 </Button>
               </div>
             )}
@@ -3554,7 +3675,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       <>
         {renderStepper()}
         <Card className="bg-transparent border-none shadow-none w-full">
-          <CardContent className="py-12 text-center">
+          <CardContent className="py-12 text-center space-y-4">
             <div className="w-16 h-16 rounded-full bg-green-500/20 flex items-center justify-center mx-auto mb-4">
               <CheckCircle2 className="w-8 h-8 text-green-400" />
             </div>
@@ -3565,6 +3686,11 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
             {createdProductId && (
               <div className="text-xs text-muted-foreground mt-2">{createdProductId}</div>
             )}
+            <div className="flex justify-center">
+              <Button onClick={() => void handleFinalizeAndView()} disabled={finalizingProduct || !createdProductId}>
+                {finalizingProduct ? 'Opening...' : 'View product'}
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </>

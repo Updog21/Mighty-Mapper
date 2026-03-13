@@ -21,7 +21,7 @@ import {
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { db } from "./db";
-import { eq, inArray, like, or, sql } from "drizzle-orm";
+import { and, eq, inArray, like, ne, or, sql } from "drizzle-orm";
 import { normalizePlatformList } from "../shared/platforms";
 
 export interface IStorage {
@@ -87,10 +87,13 @@ export class PostgresStorage implements IStorage {
   async searchProducts(query: string): Promise<Product[]> {
     const searchTerm = `%${query.toLowerCase()}%`;
     return await db.select().from(products).where(
-      or(
-        sql`LOWER(${products.productName}) LIKE ${searchTerm}`,
-        sql`LOWER(${products.vendor}) LIKE ${searchTerm}`,
-        sql`LOWER(array_to_string(${products.platforms}, ' ')) LIKE ${searchTerm}`
+      and(
+        ne(products.source, 'wizard_draft'),
+        or(
+          sql`LOWER(${products.productName}) LIKE ${searchTerm}`,
+          sql`LOWER(${products.vendor}) LIKE ${searchTerm}`,
+          sql`LOWER(array_to_string(${products.platforms}, ' ')) LIKE ${searchTerm}`
+        )
       )
     );
   }

@@ -23,7 +23,7 @@ import {
   type ProductAlias,
   type InsertProductAlias
 } from '@shared/schema';
-import { and, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, ne, or, sql } from 'drizzle-orm';
 import { runAutoMapper } from '../auto-mapper/service';
 import { deleteProductGraph, syncProductProvidesEdges, upsertProductNode } from '../lib/graph-bridge';
 import { normalizePlatformList } from '../../shared/platforms';
@@ -40,6 +40,8 @@ export interface AliasWithProduct extends ProductAlias {
   productName: string;
   vendor: string;
 }
+
+const WIZARD_DRAFT_SOURCE = 'wizard_draft';
 
 export class ProductService {
   /**
@@ -125,9 +127,12 @@ export class ProductService {
    */
   private async findProductByName(query: string): Promise<Product | null> {
     const results = await db.select().from(products).where(
-      or(
-        sql`LOWER(${products.productName}) = ${query}`,
-        sql`LOWER(${products.vendor} || ' ' || ${products.productName}) = ${query}`
+      and(
+        ne(products.source, WIZARD_DRAFT_SOURCE),
+        or(
+          sql`LOWER(${products.productName}) = ${query}`,
+          sql`LOWER(${products.vendor} || ' ' || ${products.productName}) = ${query}`
+        )
       )
     ).limit(1);
 
@@ -160,7 +165,10 @@ export class ProductService {
       })
       .from(productAliases)
       .innerJoin(products, eq(productAliases.productId, products.id))
-      .where(sql`LOWER(${productAliases.alias}) = ${query}`)
+      .where(and(
+        ne(products.source, WIZARD_DRAFT_SOURCE),
+        sql`LOWER(${productAliases.alias}) = ${query}`
+      ))
       .limit(1);
 
     return result[0] || null;
@@ -173,9 +181,12 @@ export class ProductService {
     const searchPattern = `%${query}%`;
 
     const results = await db.select().from(products).where(
-      or(
-        sql`LOWER(${products.productName}) LIKE ${searchPattern}`,
-        sql`LOWER(${products.vendor}) LIKE ${searchPattern}`
+      and(
+        ne(products.source, WIZARD_DRAFT_SOURCE),
+        or(
+          sql`LOWER(${products.productName}) LIKE ${searchPattern}`,
+          sql`LOWER(${products.vendor}) LIKE ${searchPattern}`
+        )
       )
     ).limit(1);
 
@@ -199,7 +210,11 @@ export class ProductService {
    * Get all products from database
    */
   async getAllProducts(): Promise<Product[]> {
-    return await db.select().from(products).orderBy(products.productName);
+    return await db
+      .select()
+      .from(products)
+      .where(ne(products.source, WIZARD_DRAFT_SOURCE))
+      .orderBy(products.productName);
   }
 
   /**
@@ -207,6 +222,27 @@ export class ProductService {
    */
   async getProductsBySource(source: string): Promise<Product[]> {
     return await db.select().from(products).where(eq(products.source, source));
+  }
+
+  async cleanupStaleWizardDrafts(maxAgeHours = 24): Promise<number> {
+    const cutoff = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000);
+    const staleDrafts = await db
+      .select({ productId: products.productId })
+      .from(products)
+      .where(and(
+        eq(products.source, WIZARD_DRAFT_SOURCE),
+        lt(products.createdAt, cutoff)
+      ));
+
+    let deletedCount = 0;
+    for (const draft of staleDrafts) {
+      const deleted = await this.deleteProduct(draft.productId);
+      if (deleted) {
+        deletedCount += 1;
+      }
+    }
+
+    return deletedCount;
   }
 
   /**
@@ -446,17 +482,23 @@ export class ProductService {
 
     if (productIdsFromAliases.length > 0) {
       results = await db.select().from(products).where(
-        or(
-          sql`LOWER(${products.productName}) LIKE ${searchPattern}`,
-          sql`LOWER(${products.vendor}) LIKE ${searchPattern}`,
-          sql`${products.id} = ANY(ARRAY[${sql.join(productIdsFromAliases, sql`, `)}]::int[])`
+        and(
+          ne(products.source, WIZARD_DRAFT_SOURCE),
+          or(
+            sql`LOWER(${products.productName}) LIKE ${searchPattern}`,
+            sql`LOWER(${products.vendor}) LIKE ${searchPattern}`,
+            sql`${products.id} = ANY(ARRAY[${sql.join(productIdsFromAliases, sql`, `)}]::int[])`
+          )
         )
       );
     } else {
       results = await db.select().from(products).where(
-        or(
-          sql`LOWER(${products.productName}) LIKE ${searchPattern}`,
-          sql`LOWER(${products.vendor}) LIKE ${searchPattern}`
+        and(
+          ne(products.source, WIZARD_DRAFT_SOURCE),
+          or(
+            sql`LOWER(${products.productName}) LIKE ${searchPattern}`,
+            sql`LOWER(${products.vendor}) LIKE ${searchPattern}`
+          )
         )
       );
     }

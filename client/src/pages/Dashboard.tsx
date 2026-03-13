@@ -1,24 +1,20 @@
 import { useMemo, useState, useEffect } from 'react';
-import { 
-  Search, 
-  Database, 
+import {
+  Search,
+  Database,
   Loader2,
   CheckCircle2,
-  Shield,
   ChevronRight,
-  Activity
 } from 'lucide-react';
 import { Link, useLocation } from 'wouter';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
-import { dataComponents } from '@/lib/mitreData';
 import { Asset, ctidProducts } from '@/lib/products';
 import { ProductView } from '@/components/ProductView';
 import { useSearchProducts, useAliases, useAddAlias, useDeleteAlias, useDeleteProduct, useProducts, type Product } from '@/hooks/useProducts';
 import { Sidebar } from '@/components/Sidebar';
-import { getProductMapping } from '@/lib/v18Data';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
@@ -43,7 +39,7 @@ function convertProductToAsset(product: Product): Asset {
 }
 
 export default function Dashboard() {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const [view, setView] = useState<ViewState>('search');
   const [selectedProduct, setSelectedProduct] = useState<Asset | null>(null);
   const [query, setQuery] = useState('');
@@ -78,20 +74,6 @@ export default function Dashboard() {
     }
   }, [aliasTouched, query]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const productId = params.get('productId');
-    if (!productId) return;
-    fetch(`/api/products/${encodeURIComponent(productId)}`)
-      .then(res => res.ok ? res.json() : null)
-      .then((data: Product | null) => {
-        if (!data) return;
-        setSelectedProduct(convertProductToAsset(data));
-        setView('product');
-      })
-      .catch(() => undefined);
-  }, [location]);
-
   const { data: apiProducts, isLoading } = useSearchProducts(debouncedQuery);
   const { data: allProducts = [] } = useProducts();
   const { data: aliases = [] } = useAliases();
@@ -110,12 +92,46 @@ export default function Dashboard() {
     return Array.from(map.values());
   }, [apiAssets]);
 
-  const filteredProducts = query.trim() 
-    ? (apiProducts || []).map(convertProductToAsset)
-    : mergedProducts.filter(p => {
-        if (activeCategories.includes('All Platforms')) return true;
-        return activeCategories.some(category => platformMatchesAny(p.platforms, [category]));
-      });
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const productId = params.get('productId');
+    if (!productId) {
+      setView('search');
+      setSelectedProduct(null);
+      return;
+    }
+
+    const localProduct = mergedProducts.find((candidate) => candidate.id === productId);
+    if (localProduct) {
+      setSelectedProduct(localProduct);
+      setView('product');
+      return;
+    }
+
+    let cancelled = false;
+    fetch(`/api/products/${encodeURIComponent(productId)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: Product | null) => {
+        if (cancelled || !data) return;
+        setSelectedProduct(convertProductToAsset(data));
+        setView('product');
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [location, mergedProducts]);
+
+  const filteredProducts = useMemo(() => {
+    const base = query.trim()
+      ? (apiProducts || []).map(convertProductToAsset)
+      : mergedProducts;
+    if (activeCategories.includes('All Platforms')) return base;
+    return base.filter(p =>
+      activeCategories.some(category => platformMatchesAny(p.platforms, [category]))
+    );
+  }, [query, apiProducts, mergedProducts, activeCategories]);
 
   const counts = filteredProducts.reduce(
     (acc, product) => {
@@ -130,11 +146,13 @@ export default function Dashboard() {
   const handleSelectProduct = (product: Asset) => {
     setSelectedProduct(product);
     setView('product');
+    setLocation(`/products/${encodeURIComponent(product.id)}`);
   };
 
   const handleBack = () => {
     setView('search');
     setSelectedProduct(null);
+    setLocation('/');
   };
 
   const getSourceBadge = (source: Asset['source']) => {
@@ -482,11 +500,10 @@ export default function Dashboard() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
                 {filteredProducts.map((product) => {
-                  const mapping = getProductMapping(product.id);
                   const isSelected = selectedCustomProducts.has(product.id);
                   const isVendorProduct = product.source !== 'custom';
                   return (
-                    <Card 
+                    <Card
                       key={product.id}
                       className={cn(
                         "shadow-sm hover:shadow-lg ring-1 ring-black/5 dark:ring-white/10 transition-all cursor-pointer group",
@@ -509,7 +526,7 @@ export default function Dashboard() {
                             {product.deployment && (
                               <span className="text-xs text-muted-foreground">{product.deployment}</span>
                             )}
-                            
+
                             <div className="flex items-center gap-4 mt-3 text-xs">
                               <div className="flex items-center gap-1">
                                 <CheckCircle2 className="w-3 h-3 text-blue-400" />
@@ -517,22 +534,6 @@ export default function Dashboard() {
                                   {product.dataComponentIds.length} Data Components
                                 </span>
                               </div>
-                              {mapping && (
-                                <div className="flex items-center gap-1">
-                                  <Activity className="w-3 h-3 text-purple-400" />
-                                  <span className="text-muted-foreground">
-                                    {mapping.analytics.length} Analytics
-                                  </span>
-                                </div>
-                              )}
-                              {mapping && (
-                                <div className="flex items-center gap-1">
-                                  <Shield className="w-3 h-3 text-green-400" />
-                                  <span className="text-muted-foreground">
-                                    {mapping.techniques.length} Techniques
-                                  </span>
-                                </div>
-                              )}
                             </div>
                           </div>
                           <div className="flex flex-col items-end gap-2">
