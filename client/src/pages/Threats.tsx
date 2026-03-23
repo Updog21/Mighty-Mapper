@@ -1,4 +1,4 @@
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { techniques } from '@/lib/v18Data';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -30,12 +30,7 @@ const threatGroups = [
 
 export default function Threats() {
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-      
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Threat Groups</h1>
               <p className="text-muted-foreground text-sm mt-1">
@@ -170,9 +165,6 @@ export default function Threats() {
                 </div>
               </CardContent>
             </Card>
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

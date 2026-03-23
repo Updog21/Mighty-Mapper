@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useLocation } from 'wouter';
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -10,6 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { useMitreTechniques } from '@/hooks/useMitreData';
 import { useSystemStatus } from '@/hooks/useProducts';
 import { toMarkdownTable } from '@/lib/stix-export';
+import { subjectIdPillClass } from '@/lib/utils';
 import { PLATFORM_VALUES, normalizePlatformList } from '@shared/platforms';
 import { Target, Layers, Loader2, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react';
 
@@ -131,12 +132,7 @@ export default function Techniques() {
   }, [filteredTechniques.length, groupedByTactic, selectedPlatform, techniqueFilter]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Techniques</h1>
               <p className="text-muted-foreground text-sm mt-1">
@@ -284,7 +280,7 @@ export default function Techniques() {
                                           : 'No platform tags'}
                                       </p>
                                     </div>
-                                    <Badge variant="secondary" className="text-xs font-mono text-red-600 ml-3">
+                                    <Badge variant="outline" className={`ml-3 text-xs ${subjectIdPillClass('technique')}`}>
                                       {technique.id}
                                     </Badge>
                                   </a>
@@ -299,9 +295,6 @@ export default function Techniques() {
                 )}
               </CardContent>
             </Card>
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

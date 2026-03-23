@@ -16,7 +16,7 @@ import {
   Monitor,
   Server
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, subjectIdPillClass } from '@/lib/utils';
 import { normalizePlatformList, platformMatchesAny } from '@shared/platforms';
 
 interface DetectionStrategyViewProps {
@@ -128,7 +128,7 @@ function DataComponentCard({ dc, platforms }: { dc: DataComponentRef; platforms:
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2 mb-1">
-              <Badge variant="secondary" className="text-[10px] font-mono">
+              <Badge variant="outline" className={`text-[10px] ${subjectIdPillClass('data-component')}`}>
                 {dc.id}
               </Badge>
               <a 
@@ -254,7 +254,7 @@ export function DetectionStrategyView({ strategy, onBack }: DetectionStrategyVie
               <div className="flex items-center gap-2 mt-4">
                 <span className="text-xs text-muted-foreground">Detects:</span>
                 {strategy.techniques.map(t => (
-                  <Badge key={t} variant="destructive" className="font-mono text-xs">
+                  <Badge key={t} variant="outline" className={`text-xs ${subjectIdPillClass('technique')}`}>
                     {t}
                   </Badge>
                 ))}

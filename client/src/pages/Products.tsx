@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from 'react';
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { CheckCircle2, Database, ChevronRight } from 'lucide-react';
@@ -160,26 +160,14 @@ export default function Products() {
 
   if (selectedProduct) {
     return (
-      <div className="flex h-screen overflow-hidden bg-background">
-        <Sidebar variant="dashboard" />
-        <main className="flex-1 overflow-auto">
-          <div className="grid-pattern min-h-full">
-            <div className="p-6">
-              <ProductView product={selectedProduct} onBack={() => setLocation('/products')} />
-            </div>
-          </div>
-        </main>
-      </div>
+      <AppShell>
+        <ProductView product={selectedProduct} onBack={() => setLocation('/products')} />
+      </AppShell>
     );
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Security Stack</h1>
               <p className="text-muted-foreground text-sm mt-1">
@@ -305,9 +293,6 @@ export default function Products() {
                 </div>
               </CardContent>
             </Card>
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

@@ -342,7 +342,7 @@ export class SigmaAdapter implements ResourceAdapter {
         mappingMethod,
         evidenceTier,
         coverageKind,
-        requiresValidation: hasExplicitTechnique,
+        requiresValidation: true,
         metadata: {
           log_sources: this.formatLogSources(item.logsource),
           query: item.detection || undefined,

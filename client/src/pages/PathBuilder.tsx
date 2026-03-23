@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -16,6 +16,7 @@ import {
 import { useProducts } from '@/hooks/useProducts';
 import { useToast } from '@/hooks/use-toast';
 import { ChevronRight, Filter, GitBranch, Loader2, Route, Plus, X, Save, Sparkles } from 'lucide-react';
+import { subjectIdPillClass } from '@/lib/utils';
 
 interface CoveragePathNode {
   id: string;
@@ -1198,12 +1199,7 @@ export default function PathBuilder() {
   const editorLoading = streamsLoading || stixMappingLoading;
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Path Builder</h1>
               <p className="text-muted-foreground text-sm mt-1">
@@ -1352,7 +1348,7 @@ export default function PathBuilder() {
                         <Card key={group.techniqueId} className="bg-background border-border">
                           <CardHeader className="pb-3">
                             <div className="flex flex-wrap items-center gap-2">
-                              <Badge className="bg-red-500/20 text-red-300 border-red-500/40 font-mono">
+                              <Badge variant="outline" className={subjectIdPillClass('technique')}>
                                 {group.techniqueId}
                               </Badge>
                               <CardTitle className="text-base font-normal">{group.techniqueName || group.techniqueId}</CardTitle>
@@ -1439,7 +1435,7 @@ export default function PathBuilder() {
                                   href={`/detection-strategies?strategy=${encodeURIComponent(strategyId)}`}
                                   className="inline-flex items-center"
                                 >
-                                  <Badge className="bg-blue-500/20 text-blue-300 border-blue-500/40 text-xs font-mono">
+                                  <Badge variant="outline" className={`text-xs ${subjectIdPillClass('detection-strategy')}`}>
                                     {strategyId}
                                   </Badge>
                                 </a>
@@ -1645,9 +1641,6 @@ export default function PathBuilder() {
                 )}
               </CardContent>
             </Card>
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

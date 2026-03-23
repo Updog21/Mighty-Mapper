@@ -11,6 +11,14 @@ type DbExecutor = Pick<typeof db, 'insert' | 'delete' | 'select' | 'update'>;
 
 export async function upsertProductNode(product: Product, executor: DbExecutor = db): Promise<string> {
   const stixId = generateLocalStixId("product", String(product.id));
+  const attributes = {
+    productId: product.productId,
+    vendor: product.vendor,
+    deployment: product.deployment,
+    description: product.description,
+    platforms: product.platforms,
+    source: product.source,
+  };
   await executor
     .insert(nodes)
     .values({
@@ -20,16 +28,15 @@ export async function upsertProductNode(product: Product, executor: DbExecutor =
       dataset: LOCAL_DATASET,
       datasetVersion: LOCAL_VERSION,
       localId: product.id,
-      attributes: {
-        productId: product.productId,
-        vendor: product.vendor,
-        deployment: product.deployment,
-        description: product.description,
-        platforms: product.platforms,
-        source: product.source,
-      },
+      attributes,
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: nodes.id,
+      set: {
+        name: product.productName,
+        attributes,
+      },
+    });
 
   return stixId;
 }

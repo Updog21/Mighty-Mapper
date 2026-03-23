@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -521,12 +521,7 @@ export default function AdminTasks() {
   };
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Admin Tasks</h1>
               <p className="text-muted-foreground text-sm mt-1">
@@ -541,7 +536,7 @@ export default function AdminTasks() {
                   <Server className="w-5 h-5 text-primary" />
                   System Status
                 </CardTitle>
-                <CardDescription>Current state of Antikythera components</CardDescription>
+                <CardDescription>Current state of Mighty Mapper components</CardDescription>
               </CardHeader>
               <CardContent>
                 {statusLoading ? (
@@ -1501,9 +1496,6 @@ export default function AdminTasks() {
               </CardContent>
             </Card>
 
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

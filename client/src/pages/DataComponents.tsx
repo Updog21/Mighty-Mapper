@@ -1,4 +1,4 @@
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -8,6 +8,7 @@ import { useSystemStatus } from '@/hooks/useProducts';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toMarkdownTable } from '@/lib/stix-export';
+import { subjectIdPillClass } from '@/lib/utils';
 import { PLATFORM_VALUES, normalizePlatformList } from '@shared/platforms';
 import { Database, Layers, Loader2, AlertCircle, ExternalLink, ChevronDown, ChevronRight } from 'lucide-react';
 import { useMemo, useState } from 'react';
@@ -114,12 +115,7 @@ export default function DataComponents() {
   }, [componentRows, selectedPlatform]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Data Components</h1>
               <p className="text-muted-foreground text-sm mt-1">
@@ -240,19 +236,19 @@ export default function DataComponents() {
                               <CollapsibleTrigger asChild>
                                 <button
                                   type="button"
-                                  className="w-full p-4 flex items-center justify-between text-left hover:bg-muted/20 transition-colors"
+                                  className="flex w-full items-start justify-between gap-3 p-4 text-left transition-colors hover:bg-muted/20"
                                 >
-                                  <div className="min-w-0">
-                                    <div className="flex flex-wrap items-center gap-2">
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-start justify-between gap-3">
                                       <h3 className="text-base font-normal text-foreground leading-tight">
                                         {component.name}
                                       </h3>
-                                      <Badge variant="secondary" className="text-xs font-mono">
+                                      <Badge variant="outline" className={`shrink-0 text-xs ${subjectIdPillClass('data-component')}`}>
                                         {attackId || 'Unknown ID'}
                                       </Badge>
                                     </div>
                                   </div>
-                                  <div className="flex items-center gap-2 ml-3">
+                                  <div className="ml-1 flex items-center gap-2">
                                     {isExpanded ? (
                                       <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />
                                     ) : (
@@ -400,9 +396,6 @@ export default function DataComponents() {
                 )}
               </CardContent>
             </Card>
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

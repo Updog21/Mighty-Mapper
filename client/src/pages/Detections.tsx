@@ -1,10 +1,10 @@
 import { memo, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Loader2, Boxes, X, ChevronDown, ChevronRight, Copy, Check } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, subjectIdPillClass } from '@/lib/utils';
 import { useDetections, Detection, DetectionSource } from '@/hooks/useDetections';
 import { RESOURCE_LABELS, ResourceType } from '@/hooks/useAutoMapper';
 import { Input } from '@/components/ui/input';
@@ -203,7 +203,7 @@ const DetectionsList = memo(function DetectionsList({
                         {detection.name}
                         {detection.techniqueIds && detection.techniqueIds.length > 0 && (
                           detection.techniqueIds.map(tid => (
-                            <Badge key={tid} className="text-xs font-mono bg-red-500/40 text-foreground border border-red-500/50">
+                            <Badge key={tid} variant="outline" className={`text-xs ${subjectIdPillClass('technique')}`}>
                               {tid}
                             </Badge>
                           ))
@@ -420,12 +420,7 @@ export default function Detections() {
   }, [filteredSources.join('|')]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header className="space-y-2">
               <div className="flex items-center gap-2">
                 <Boxes className="w-5 h-5 text-primary" />
@@ -605,9 +600,6 @@ export default function Detections() {
               copiedId={copiedId}
               setCopiedId={setCopiedId}
             />
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

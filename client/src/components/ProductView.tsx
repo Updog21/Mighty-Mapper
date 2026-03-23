@@ -35,7 +35,7 @@ import {
   FileDown,
   Trash2,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, subjectIdPillClass } from '@/lib/utils';
 import { useAutoMappingWithAutoRun, RESOURCE_LABELS, ResourceType, StixDataComponent, StixAnalytic, StixDetectionStrategy, AnalyticMapping } from '@/hooks/useAutoMapper';
 import { useProductSsm } from '@/hooks/useProductSsm';
 import { getAggregateCoverage } from '@/lib/ssm-utils';
@@ -3230,8 +3230,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                               rel="noopener noreferrer"
                                               title={techniqueDescription || undefined}
                                             >
-                                              <Badge variant="secondary" className="text-xs font-mono hover:bg-muted/70 transition-colors">
-                                                <span className="text-red-600 mr-1">{techId}</span>
+                                              <Badge variant="outline" className={`text-xs hover:bg-muted/70 transition-colors ${subjectIdPillClass('technique')}`}>
+                                                <span className="mr-1">{techId}</span>
                                                 <ExternalLink className="w-3 h-3 text-muted-foreground" />
                                               </Badge>
                                             </a>
@@ -3587,8 +3587,8 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                                           rel="noopener noreferrer"
                                           title={techniqueDescription || undefined}
                                         >
-                                          <Badge variant="secondary" className="text-xs font-mono hover:bg-muted/70 transition-colors">
-                                            <span className="text-red-600 mr-1">{techId}</span>
+                                          <Badge variant="outline" className={`text-xs hover:bg-muted/70 transition-colors ${subjectIdPillClass('technique')}`}>
+                                            <span className="mr-1">{techId}</span>
                                             <ExternalLink className="w-3 h-3 text-muted-foreground" />
                                           </Badge>
                                         </a>
@@ -5011,7 +5011,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                           aria-pressed={isSelected}
                           data-testid={`button-dc-chip-${dc.id}`}
                         >
-                          <Badge variant="secondary" className="text-[10px] font-mono">
+                          <Badge variant="outline" className={`text-[10px] ${subjectIdPillClass('data-component')}`}>
                             {dc.id}
                           </Badge>
                           <span className="text-foreground">{dc.name}</span>

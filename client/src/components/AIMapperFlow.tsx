@@ -10,7 +10,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { CheckCircle2, ChevronRight, Loader2, Plus, Trash2 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, subjectIdPillClass } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { AnalyticRequirementsPanel, InlineRequirementHint, type EnrichedEvidence } from '@/components/AnalyticRequirementsPanel';
 import { normalizePlatformList } from '@shared/platforms';
@@ -2804,7 +2804,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
                                 <div className="text-sm font-semibold text-foreground">
                                   Do the product/service generate a log for {component.name}?
                                 </div>
-                                <Badge variant="secondary" className="text-[10px] font-mono">
+                                <Badge variant="outline" className={`text-[10px] ${subjectIdPillClass('data-component')}`}>
                                   {component.id}
                                 </Badge>
                               </div>

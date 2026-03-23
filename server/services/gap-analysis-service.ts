@@ -71,6 +71,8 @@ export async function getCoveragePaths(
         t.path || nxt.next_id,
         t.depth + 1
       FROM traversal t
+      -- Traverse backward through looks_for/uses (analytic→DC, strategy→analytic)
+      -- then forward through detects (strategy→technique)
       JOIN edges e ON (
         (e.type = 'looks_for' AND e.target_id = t.node_id) OR
         (e.type = 'uses' AND e.target_id = t.node_id) OR
@@ -277,9 +279,13 @@ export async function getCoverageGaps(
           AND e.dataset = 'mitre_attack'
           AND e.dataset_version = ${mitreDatasetVersion}
       ),
+      -- Only count techniques as covered if this product's graph actually reaches them.
+      -- platform_techniques is used separately to scope which techniques are *relevant*
+      -- to this product's platforms, not to mark them as covered.
       covered AS (
         SELECT node_id FROM strict_covered
-        UNION
+      ),
+      platform_relevant AS (
         SELECT technique_id FROM platform_techniques
       )
       SELECT
@@ -291,6 +297,7 @@ export async function getCoverageGaps(
         AND n.dataset = 'mitre_attack'
         AND n.dataset_version = ${mitreDatasetVersion}
         AND n.id NOT IN (SELECT node_id FROM covered)
+        AND n.id IN (SELECT technique_id FROM platform_relevant)
       ORDER BY technique_id;
     `);
 
@@ -333,6 +340,8 @@ export async function getCoverageGaps(
         t.path || nxt.next_id,
         t.depth + 1
       FROM traversal t
+      -- Traverse backward through looks_for/uses (analytic→DC, strategy→analytic)
+      -- then forward through detects (strategy→technique)
       JOIN edges e ON (
         (e.type = 'looks_for' AND e.target_id = t.node_id) OR
         (e.type = 'uses' AND e.target_id = t.node_id) OR

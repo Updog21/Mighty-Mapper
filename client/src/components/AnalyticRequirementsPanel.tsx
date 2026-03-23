@@ -19,6 +19,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { cn, subjectIdPillClass } from '@/lib/utils';
 import {
   ChevronDown,
   ChevronRight,
@@ -28,7 +29,6 @@ import {
   Settings2,
   Zap,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { platformMatchesAny } from '@shared/platforms';
 import {
   DC_ANALYTIC_REQUIREMENTS,
@@ -201,7 +201,7 @@ function RequirementCard({
         className="w-full flex items-center justify-between p-3 text-left hover:bg-muted/30 transition-colors"
       >
         <div className="flex items-center gap-2">
-          <Badge variant="secondary" className="text-xs font-mono">
+          <Badge variant="outline" className={`text-xs ${subjectIdPillClass('data-component')}`}>
             {requirement.dcId}
           </Badge>
           <span className="text-sm font-medium text-foreground">

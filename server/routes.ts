@@ -571,9 +571,9 @@ export async function registerRoutes(
         let status: TechniqueAssessmentStatus = "candidate";
         let scoreCategory: TechniqueScoreCategory = "Minimal";
 
-        if (requiredCount > 0 && (requirementCoverageRatio >= 0.6 || matchedCount >= 3)) {
+        if (requiredCount > 0 && (requirementCoverageRatio >= 0.6 || (matchedCount >= 3 && requirementCoverageRatio >= 0.25))) {
           status = "confirmed";
-          scoreCategory = requirementCoverageRatio >= 0.85 || matchedCount >= 5 ? "Significant" : "Partial";
+          scoreCategory = requirementCoverageRatio >= 0.85 || (matchedCount >= 5 && requirementCoverageRatio >= 0.5) ? "Significant" : "Partial";
         }
 
         const scoreValue = requiredCount > 0

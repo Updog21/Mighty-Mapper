@@ -14,7 +14,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Asset, ctidProducts } from '@/lib/products';
 import { ProductView } from '@/components/ProductView';
 import { useSearchProducts, useAliases, useAddAlias, useDeleteAlias, useDeleteProduct, useProducts, type Product } from '@/hooks/useProducts';
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
@@ -271,14 +271,11 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        {view === 'product' && selectedProduct ? (
-            <ProductView product={selectedProduct} onBack={handleBack} />
-        ) : (
-          <div className="p-8 space-y-6">
+    <AppShell contentClassName="space-y-6">
+      {view === 'product' && selectedProduct ? (
+        <ProductView product={selectedProduct} onBack={handleBack} />
+      ) : (
+        <>
             <header>
               <h1 className="text-2xl font-semibold text-foreground">Security Products</h1>
               <p className="text-muted-foreground mt-1">
@@ -570,9 +567,8 @@ export default function Dashboard() {
                 )}
               </div>
             )}
-          </div>
-        )}
-      </main>
-    </div>
+        </>
+      )}
+    </AppShell>
   );
 }

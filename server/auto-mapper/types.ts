@@ -73,3 +73,4 @@ export const RESOURCE_PRIORITY: Record<string, ResourceType[]> = {
   abstract: ['mitre_stix', 'ctid', 'splunk', 'sigma'],
   default: ['ctid', 'sigma', 'elastic', 'splunk', 'azure', 'mitre_stix'],
 };
+

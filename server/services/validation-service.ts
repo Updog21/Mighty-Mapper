@@ -84,11 +84,13 @@ export class GeminiProvider implements AIProvider {
       };
     } catch (error) {
       console.error("Gemini Validation Error:", error);
+      // Return 'uncertain' rather than 'invalid' on API errors to avoid
+      // permanently penalizing rules due to transient failures
       return {
-        isValid: false,
-        confidence: 0,
+        isValid: true,
+        confidence: 30,
         metadata: {
-          reasoning: "AI Validation failed due to error: " + (error as Error).message
+          reasoning: "AI Validation inconclusive due to error: " + (error as Error).message
         }
       };
     }

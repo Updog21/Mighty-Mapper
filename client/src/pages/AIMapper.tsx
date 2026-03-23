@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation } from 'wouter';
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { AIMapperFlow } from '@/components/AIMapperFlow';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -31,15 +31,10 @@ export default function AIMapper() {
   };
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header className="flex items-center justify-between">
               <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-lg bg-primary/20 flex items-center justify-center glow-primary">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/20">
                   <Cpu className="w-5 h-5 text-primary" />
                 </div>
                 <div>
@@ -91,9 +86,6 @@ export default function AIMapper() {
                 </Card>
               </div>
             )}
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

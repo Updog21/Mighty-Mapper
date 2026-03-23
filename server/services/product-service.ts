@@ -99,11 +99,21 @@ export class ProductService {
   private buildSearchTerms(product: Product, aliases: string[]): ResolvedSearchTerms {
     const terms = new Set<string>();
 
-    // Only use vendor + product and explicit aliases
     const name = product.productName.trim();
     const vendor = product.vendor.trim();
+
+    // Combined vendor + product name
     if (vendor && name) {
       terms.add(`${vendor} ${name}`.toLowerCase());
+    }
+    // Product name alone (if multi-word or distinctive enough)
+    if (name && name.length > 3) {
+      terms.add(name.toLowerCase());
+    }
+    // Vendor name alone (only if distinctive — skip very generic vendor names)
+    const genericVendors = new Set(['microsoft', 'google', 'amazon', 'aws', 'ibm', 'oracle']);
+    if (vendor && !genericVendors.has(vendor.toLowerCase())) {
+      terms.add(vendor.toLowerCase());
     }
 
     // Add all aliases

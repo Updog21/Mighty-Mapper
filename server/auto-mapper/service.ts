@@ -191,7 +191,9 @@ const validationWeight = (analytic: AnalyticMapping): number => {
     case 'valid':
       return 1.05;
     default:
-      return 0.9;
+      // Unvalidated analytics get a conservative weight to avoid
+      // inflating confidence from rules that haven't been checked
+      return 0.7;
   }
 };
 
@@ -214,7 +216,9 @@ const calculatePublishedConfidence = (
   const breadthScore = Math.min(20, publishedAnalytics.length * 3);
   const sourceScore = Math.min(15, sources.length * 5);
 
-  return Math.min(100, Math.round(35 + averageEvidence * 30 + breadthScore + sourceScore));
+  // Scale base score by average evidence quality so weak-only mappings start lower
+  const baseScore = Math.round(15 + averageEvidence * 20);
+  return Math.min(100, Math.round(baseScore + averageEvidence * 30 + breadthScore + sourceScore));
 };
 
 export async function runAutoMapper(productId: string): Promise<MappingResult> {
@@ -322,16 +326,21 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
             mapped_data_components: mappedDataComponents,
           };
 
-          // Fix: Preserve specific techniques if they exist (prevents dilution)
-          const finalTechniqueIds = hasTechniques 
-            ? analytic.techniqueIds 
+          // Preserve specific techniques if they exist (prevents dilution)
+          const finalTechniqueIds = hasTechniques
+            ? analytic.techniqueIds
             : Array.from(inferredTechniques);
 
           if (!hasTechniques) {
             inferredMetadata.coverage_type = 'telemetry';
+            inferredMetadata.telemetry_fan_out = inferredTechniques.size;
           } else {
             inferredMetadata.stream_inferred_techniques = Array.from(inferredTechniques);
           }
+
+          // When DC fan-out is large, downgrade evidence tier to 'weak' since
+          // a broad DC like "Process Creation" mapping to 50+ techniques is low-confidence
+          const telemetryEvidenceTier = !hasTechniques && inferredTechniques.size > 15 ? 'weak' : 'medium';
 
           return [withAnalyticProvenance({
             ...analytic,
@@ -341,7 +350,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
             metadata: inferredMetadata,
           }, !hasTechniques ? {
             coverageKind: 'visibility',
-            evidenceTier: 'medium',
+            evidenceTier: telemetryEvidenceTier as AnalyticMapping['evidenceTier'],
             mappingMethod: 'stream_data_component_inference',
           } : {})];
         }
@@ -372,7 +381,9 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
     }
 
     mapping.analytics = updatedAnalytics;
-    mapping.detectionStrategies = Array.from(techniqueSet).map(t => `DS-${t}`);
+    // Store covered technique IDs directly — these represent technique coverage,
+    // not actual MITRE detection strategy references
+    mapping.detectionStrategies = Array.from(techniqueSet);
   };
 
   await db.delete(ssmMappings).where(
@@ -424,7 +435,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
 
         if (mapping && (mapping.analytics.length > 0 || mapping.dataComponents.length > 0)) {
           resolveMappingStreams(resourceType, mapping);
-          if (resourceType === 'sigma' || resourceType === 'splunk') {
+          if (resourceType === 'sigma' || resourceType === 'splunk' || resourceType === 'elastic' || resourceType === 'azure') {
             console.log(`[AutoMapper] Validating ${mapping.analytics.length} rules for ${resourceType}...`);
             await validateAnalytics(mapping.analytics, productName);
           }
@@ -686,19 +697,17 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
     }
 
     for (const platform of targetPlatforms) {
-      const [capability] = await db.insert(ssmCapabilities).values({
-        productId,
-        capabilityGroupId: `${ssmSource}_${slugifyPlatform(platform)}_${productId}`,
-        name: `CTID Mappings (${platform})`,
-        description: `Imported ${rawMappings.length} mappings from CTID.`,
-        platform,
-        source: ssmSource,
-      }).returning();
-
       const mappingsToInsert = [];
       for (const rule of rawMappings) {
         const techId = normalizeTechniqueId(rule.attack_object_id);
         if (!techId) continue;
+
+        // Filter: only include this mapping if the technique is relevant to this platform
+        const techInfo = mitreKnowledgeGraph.getTechnique(techId);
+        if (techInfo && techInfo.platforms.length > 0 && !isRuleRelevantToPlatform(techInfo.platforms, platform)) {
+          continue;
+        }
+
         const analytic = analyticsByTechnique.get(techId);
         const analyticMetadata = (analytic?.metadata || {}) as Record<string, unknown>;
         const scoreValue = rule.score_value || rule.attack_object_name || rule.capability_description || 'CTID Mapping';
@@ -723,7 +732,6 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
         }
 
         mappingsToInsert.push({
-          capabilityId: capability.id,
           techniqueId: techId,
           techniqueName: techniqueNameMap.get(techId) || rule.attack_object_name || techId,
           mappingType: rule.mapping_type || 'Detect',
@@ -739,9 +747,20 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
         });
       }
 
-      if (mappingsToInsert.length > 0) {
-        await db.insert(ssmMappings).values(mappingsToInsert);
-      }
+      if (mappingsToInsert.length === 0) continue;
+
+      const [capability] = await db.insert(ssmCapabilities).values({
+        productId,
+        capabilityGroupId: `${ssmSource}_${slugifyPlatform(platform)}_${productId}`,
+        name: `CTID Mappings (${platform})`,
+        description: `Imported ${mappingsToInsert.length} mappings from CTID.`,
+        platform,
+        source: ssmSource,
+      }).returning();
+
+      await db.insert(ssmMappings).values(
+        mappingsToInsert.map(m => ({ ...m, capabilityId: capability.id }))
+      );
     }
   };
 
@@ -829,30 +848,56 @@ async function validateAnalytics(analytics: AnalyticMapping[], productName: stri
   const provider = await validationService.getProvider();
   if (!provider) return; // Skip if no AI configured
 
-  // Validate only the first 5 to save tokens/time for now
-  // In a production job queue, we would do all.
-  const batch = analytics
-    .filter((analytic) => analytic.requiresValidation ?? isDetectAnalytic(analytic))
-    .slice(0, 5);
+  const AI_VALIDATION_BATCH_SIZE = 20;
+  const candidates = analytics
+    .filter((analytic) => analytic.requiresValidation ?? isDetectAnalytic(analytic));
+  // Prioritize: inferred/visibility analytics first (higher false-positive risk),
+  // then detect analytics, so limited budget targets the most uncertain rules
+  const prioritized = [...candidates].sort((a, b) => {
+    const aKind = getAnalyticCoverageKind(a);
+    const bKind = getAnalyticCoverageKind(b);
+    // Lower coverage kind rank = higher validation priority
+    return (coverageKindRank[aKind] ?? 0) - (coverageKindRank[bKind] ?? 0);
+  });
+  const batch = prioritized.slice(0, AI_VALIDATION_BATCH_SIZE);
 
   for (const analytic of batch) {
     try {
+      // Serialize query to string — Sigma stores detection as a parsed object
+      const queryStr = typeof analytic.query === 'string'
+        ? analytic.query
+        : analytic.query != null
+          ? JSON.stringify(analytic.query, null, 2)
+          : 'N/A';
       const ruleContent = `
         Product: ${productName}
         Rule Name: ${analytic.name}
         Description: ${analytic.description || 'N/A'}
-        Query/Pseudocode: ${analytic.query || 'N/A'}
+        Query/Pseudocode: ${queryStr}
       `;
       
       const result = await validationService.validate(ruleContent);
-      
-      analytic.validationStatus = result.isValid ? 'valid' : 'invalid';
+
+      analytic.validationStatus = result.confidence < 40 ? 'uncertain' : result.isValid ? 'valid' : 'invalid';
       analytic.aiConfidence = result.confidence;
       analytic.mutableElements = result.metadata.mutableElements;
-      
+
+      // Use AI-suggested technique ID to correct or augment the mapping
+      if (result.metadata.techniqueId) {
+        const correctedId = normalizeTechniqueId(result.metadata.techniqueId);
+        if (correctedId) {
+          const existingIds = analytic.techniqueIds || [];
+          if (!existingIds.includes(correctedId)) {
+            analytic.techniqueIds = [...existingIds, correctedId];
+            analytic.metadata = {
+              ...(analytic.metadata || {}),
+              ai_suggested_technique: correctedId,
+            };
+          }
+        }
+      }
+
       if (result.metadata.reasoning) {
-        // Append reasoning to description or store separately
-        // For now, simple append if space permits
         analytic.description = `${analytic.description || ''} \n[AI Validation]: ${result.metadata.reasoning}`.trim();
       }
     } catch (e) {
@@ -907,9 +952,9 @@ function combineAllMappings(
         ...existing,
         ...analytic,
         techniqueIds: combined,
-        validationStatus: analytic.validationStatus === 'valid'
-          ? analytic.validationStatus
-          : existing.validationStatus,
+        validationStatus: existing.validationStatus === 'valid' || analytic.validationStatus === 'valid'
+          ? 'valid'
+          : analytic.validationStatus || existing.validationStatus,
         aiConfidence: Math.max(existing.aiConfidence || 0, analytic.aiConfidence || 0) || undefined,
       }, {
         coverageKind: chosenCoverageKind,

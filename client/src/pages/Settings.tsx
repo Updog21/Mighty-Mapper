@@ -1,4 +1,4 @@
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -8,16 +8,11 @@ import { Settings as SettingsIcon, Server, Database, Webhook, Key } from 'lucide
 
 export default function Settings() {
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-      
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Settings</h1>
               <p className="text-muted-foreground text-sm mt-1">
-                Configure Antikythera connections and preferences
+                Configure Mighty Mapper connections and preferences
               </p>
             </header>
 
@@ -170,9 +165,6 @@ export default function Settings() {
                 Save Settings
               </Button>
             </div>
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

@@ -1,19 +1,14 @@
-import { Sidebar } from '@/components/Sidebar';
+import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { BookOpen, Layers, Cpu, Shield, Wrench } from 'lucide-react';
 
 export default function Documentation() {
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header>
               <h1 className="text-2xl font-bold text-foreground tracking-tight">Documentation</h1>
               <p className="text-muted-foreground text-sm mt-1">
-                Learn how Antikythera works and how to use each feature.
+                Learn how Mighty Mapper works and how to use each feature.
               </p>
             </header>
 
@@ -91,9 +86,6 @@ export default function Documentation() {
                 </CardContent>
               </Card>
             </div>
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

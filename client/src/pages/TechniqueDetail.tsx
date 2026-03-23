@@ -1,13 +1,14 @@
 import { useMemo } from 'react';
 import { useRoute } from 'wouter';
-import { Sidebar } from '@/components/Sidebar';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { AppShell } from '@/components/AppShell';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { StixExportControls } from '@/components/StixExportControls';
 import { useMitreTechniqueDetail } from '@/hooks/useMitreData';
 import { useSystemStatus } from '@/hooks/useProducts';
 import { toMarkdownTable } from '@/lib/stix-export';
+import { subjectIdPillClass } from '@/lib/utils';
 import { Target, Loader2, AlertCircle, ExternalLink, ArrowLeft } from 'lucide-react';
 
 export default function TechniqueDetail() {
@@ -120,12 +121,7 @@ export default function TechniqueDetail() {
   }, [technique, techniqueId]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
-      <Sidebar variant="dashboard" />
-
-      <main className="flex-1 overflow-auto">
-        <div className="grid-pattern min-h-full">
-          <div className="p-6 space-y-6">
+    <AppShell contentClassName="space-y-6">
             <header className="space-y-2">
               <a
                 href="/techniques"
@@ -177,15 +173,15 @@ export default function TechniqueDetail() {
               <>
                 <Card className="bg-card/50 backdrop-blur border-border">
                   <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Target className="w-5 h-5 text-primary" />
-                      {technique.name}
-                    </CardTitle>
-                    <CardDescription className="flex items-center gap-2">
-                      <Badge variant="secondary" className="text-xs font-mono text-red-600">
+                    <div className="flex items-start justify-between gap-3">
+                      <CardTitle className="flex min-w-0 items-start gap-2">
+                        <Target className="mt-0.5 w-5 h-5 shrink-0 text-primary" />
+                        <span className="min-w-0">{technique.name}</span>
+                      </CardTitle>
+                      <Badge variant="outline" className={`shrink-0 text-xs ${subjectIdPillClass('technique')}`}>
                         {technique.id}
                       </Badge>
-                    </CardDescription>
+                    </div>
                   </CardHeader>
                   <CardContent className="space-y-4">
                     <a
@@ -397,9 +393,6 @@ export default function TechniqueDetail() {
                 </Card>
               </>
             )}
-          </div>
-        </div>
-      </main>
-    </div>
+    </AppShell>
   );
 }

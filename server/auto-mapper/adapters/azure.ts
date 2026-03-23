@@ -199,6 +199,7 @@ export class AzureAdapter implements ResourceAdapter {
     const haystackParts = [
       fileName,
       rule.name,
+      rule.description,
       ...(rule.connectorIds || []),
       ...(rule.dataTypes || []),
     ]
