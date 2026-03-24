@@ -138,58 +138,64 @@ function getPrimaryTactic(technique?: { tactic?: string; tactics?: string[] }): 
 }
 
 type ScenarioQuestionKey =
-  | 'blackBox'
-  | 'passThrough'
-  | 'publicFacing'
-  | 'authHandling'
-  | 'crownJewel'
-  | 'humanSurface';
+  | 'processVisibility'
+  | 'dataAtRest'
+  | 'userInteraction'
+  | 'internetExposed'
+  | 'managesCredentials'
+  | 'highImpact'
+  | 'sensitiveData';
 
-type ScenarioDropReason = 'blackBox' | 'passThrough' | 'humanSurface';
+type ScenarioDropReason = 'processVisibility' | 'dataAtRest' | 'userInteraction';
 
 interface ScenarioAnswers {
-  blackBox: boolean;
-  passThrough: boolean;
-  publicFacing: boolean;
-  authHandling: boolean;
-  crownJewel: boolean;
-  humanSurface: boolean;
+  processVisibility: boolean;
+  dataAtRest: boolean;
+  userInteraction: boolean;
+  internetExposed: boolean;
+  managesCredentials: boolean;
+  highImpact: boolean;
+  sensitiveData: boolean;
 }
 
 const DEFAULT_SCENARIO_ANSWERS: ScenarioAnswers = {
-  blackBox: false,
-  passThrough: false,
-  publicFacing: false,
-  authHandling: false,
-  crownJewel: false,
-  humanSurface: true,
+  processVisibility: true,
+  dataAtRest: true,
+  userInteraction: true,
+  internetExposed: false,
+  managesCredentials: false,
+  highImpact: false,
+  sensitiveData: false,
 };
 
 const SCENARIO_QUESTION_LABELS: Record<ScenarioQuestionKey, string> = {
-  blackBox: 'Black Box',
-  passThrough: 'Pass-Through',
-  publicFacing: 'Public-Facing',
-  authHandling: 'Auth Handling',
-  crownJewel: 'Crown Jewel',
-  humanSurface: 'Human Surface',
+  processVisibility: 'You can see running processes, files, and OS activity on this product',
+  dataAtRest: 'This product stores or has access to stored data',
+  userInteraction: 'End users open this product in a browser, email client, or desktop app',
+  internetExposed: 'This product is directly reachable from the internet',
+  managesCredentials: 'This product stores or manages passwords, keys, tokens, or sessions',
+  highImpact: 'If this product goes down, it seriously disrupts the business',
+  sensitiveData: 'This product stores sensitive data like PII, financial records, or health data',
 };
 
 const SCENARIO_QUESTION_HELP: Record<ScenarioQuestionKey, string> = {
-  blackBox: 'Appliance/SaaS (no OS access) vs full endpoint visibility.',
-  passThrough: 'Gateway/proxy (data in motion) vs storage (data at rest).',
-  publicFacing: 'Internet-exposed vs internal-only.',
-  authHandling: 'Manages logins/keys vs no credentials.',
-  crownJewel: 'Critical asset vs commodity.',
-  humanSurface: 'UI/phishing target vs API-only.',
+  processVisibility: 'YES for servers, workstations, or laptops where you have an EDR agent, Sysmon, or OS-level logging installed. NO for cloud services, SaaS apps, or network appliances where you can only see external behavior.',
+  dataAtRest: 'YES for databases, file servers, endpoints, or any system that stores files, logs, or records. NO for firewalls, proxies, load balancers, or gateways that only inspect traffic passing through.',
+  userInteraction: 'YES if real people (not just admins) use this product day-to-day — opening emails, browsing a portal, editing documents. NO for headless infrastructure, APIs, or backend services with no direct user interaction.',
+  internetExposed: 'YES if this product has a public IP, listens on a public port, or is accessible without a VPN. Includes web apps, email gateways, VPN concentrators, and public APIs.',
+  managesCredentials: 'YES for identity providers (Okta, Entra ID), SSO gateways, Active Directory, password vaults, or any system that issues or validates login credentials.',
+  highImpact: 'YES if taking this product offline would halt critical business operations, affect customers, or trigger incident response. Think domain controllers, payment processing, core databases.',
+  sensitiveData: 'YES if this product stores or processes personal information, financial records, health data, trade secrets, or anything subject to regulatory requirements (GDPR, HIPAA, PCI-DSS).',
 };
 
 const SCENARIO_QUESTION_WHY: Record<ScenarioQuestionKey, string> = {
-  blackBox: "Black Box can't see processes/persistence.",
-  passThrough: "Gateways can't collect/store exfil data.",
-  publicFacing: 'Public = high Initial Access risk.',
-  authHandling: 'Auth surfaces brute force/key abuse.',
-  crownJewel: 'Protects highest business impact.',
-  humanSurface: 'No UI = no phishing/user execution.',
+  processVisibility: 'Without OS-level access, techniques like process injection, registry persistence, and privilege escalation cannot be observed — they are removed from the ranking.',
+  dataAtRest: 'If the product only sees traffic in transit, data collection and staged exfiltration happening on endpoints behind it are invisible — those techniques are removed.',
+  userInteraction: 'Without real users, phishing (T1566), drive-by compromise (T1189), and user execution (T1204) are impossible — those techniques are removed.',
+  internetExposed: 'Internet exposure makes Initial Access techniques far more likely — exploit of public-facing applications, drive-by compromise, and external phishing all require internet reachability.',
+  managesCredentials: 'Products that manage credentials are prime targets for brute force, credential stuffing, token theft, and session hijacking — Credential Access techniques are ranked higher.',
+  highImpact: 'Business-critical assets warrant deeper coverage of Impact techniques — data destruction, ransomware encryption, and service disruption are ranked higher.',
+  sensitiveData: 'When sensitive data is present, adversaries are more likely to pursue Collection and Exfiltration techniques to steal it — those techniques are ranked higher.',
 };
 
 const SCENARIO_REFERENCE_LINKS: Array<{ label: string; url: string }> = [
@@ -207,19 +213,19 @@ const SCENARIO_REFERENCE_LINKS: Array<{ label: string; url: string }> = [
   { label: 'Lockheed Cyber Kill Chain (PDF)', url: 'https://www.lockheedmartin.com/content/dam/lockheed-martin/rms/documents/cyber/Gaining_the_Advantage_Cyber_Kill_Chain.pdf' },
 ];
 
-const BLACK_BOX_DROP_TACTICS = new Set([
+const NO_PROCESS_VISIBILITY_DROP_TACTICS = new Set([
   'execution',
   'persistence',
   'privilege escalation',
   'defense evasion',
 ]);
 
-const PASS_THROUGH_DROP_TACTICS = new Set([
+const NO_DATA_AT_REST_DROP_TACTICS = new Set([
   'collection',
   'exfiltration',
 ]);
 
-const HUMAN_SURFACE_DENYLIST = [
+const USER_INTERACTION_DENYLIST = [
   'T1566',
   'T1189',
   'T1204',
@@ -269,33 +275,37 @@ function inferScenarioAnswers(productName: string, platforms: string[]): Scenari
 
   const endpointPlatforms: PlatformValue[] = ['Windows', 'Linux', 'macOS', 'Android', 'iOS'];
   const endpointVisible = endpointPlatforms.some((entry) => platformSet.has(entry));
-  const applianceOrSaasPlatforms = ['SaaS', 'Network Devices', 'IaaS', 'Containers', 'Identity Provider', 'Office 365', 'Google Workspace'];
-  const mostlyBlackBox = !endpointVisible && normalizedPlatforms.length > 0
-    && normalizedPlatforms.every((entry) => applianceOrSaasPlatforms.includes(entry));
 
-  const passThroughKeyword = /(gateway|proxy|firewall|load balancer|edge|waf|reverse proxy|api management|api gateway|ingress)/i;
+  const networkOnlyKeyword = /(gateway|proxy|firewall|load balancer|edge|waf|reverse proxy|api management|api gateway|ingress)/i;
   const authKeyword = /(auth|identity|login|sso|oauth|oidc|iam|directory|entra|okta|access control|credential)/i;
-  const crownKeyword = /(security|siem|xdr|edr|identity|api|database|data lake|vault|critical)/i;
+  const criticalKeyword = /(security|siem|xdr|edr|identity|api|database|data lake|vault|critical)/i;
+  const sensitiveKeyword = /(database|data lake|crm|erp|health|medical|financial|payment|pci|hipaa|gdpr|pii)/i;
 
-  const passThrough = platformSet.has('Network Devices') || passThroughKeyword.test(name);
-  const publicFacing = passThrough || platformSet.has('SaaS') || platformSet.has('IaaS') || /public|external|internet|edge|portal|api/.test(name);
-  const authHandling = platformSet.has('Identity Provider')
-    || platformSet.has('Office 365')
-    || platformSet.has('Google Workspace')
-    || authKeyword.test(name);
-  const crownJewel = authHandling || crownKeyword.test(name);
-  const humanSurface = endpointVisible
+  const isNetworkOnly = platformSet.has('Network Devices') || networkOnlyKeyword.test(name);
+
+  const processVisibility = endpointVisible;
+  const dataAtRest = !isNetworkOnly;
+  const userInteraction = endpointVisible
     || platformSet.has('Office 365')
     || platformSet.has('Google Workspace')
     || /email|browser|workspace|office|portal|service desk|ticket|collaboration/.test(name);
+  const internetExposed = isNetworkOnly || platformSet.has('SaaS') || platformSet.has('IaaS')
+    || /public|external|internet|edge|portal|api/.test(name);
+  const managesCredentials = platformSet.has('Identity Provider')
+    || platformSet.has('Office 365')
+    || platformSet.has('Google Workspace')
+    || authKeyword.test(name);
+  const highImpact = managesCredentials || criticalKeyword.test(name);
+  const sensitiveData = sensitiveKeyword.test(name);
 
   return {
-    blackBox: mostlyBlackBox,
-    passThrough,
-    publicFacing,
-    authHandling,
-    crownJewel,
-    humanSurface,
+    processVisibility,
+    dataAtRest,
+    userInteraction,
+    internetExposed,
+    managesCredentials,
+    highImpact,
+    sensitiveData,
   };
 }
 
@@ -306,30 +316,32 @@ function getScenarioDropReasons(
 ): ScenarioDropReason[] {
   const reasons: ScenarioDropReason[] = [];
   const normalizedTactics = tactics.map(normalizeTacticKey);
-  // Only drop if ALL tactics trigger the drop — a technique is relevant if any tactic is
-  if (answers.blackBox && normalizedTactics.length > 0 && normalizedTactics.every(t => BLACK_BOX_DROP_TACTICS.has(t))) {
-    reasons.push('blackBox');
+  // Drop when capability is OFF and ALL tactics require it
+  if (!answers.processVisibility && normalizedTactics.length > 0 && normalizedTactics.every(t => NO_PROCESS_VISIBILITY_DROP_TACTICS.has(t))) {
+    reasons.push('processVisibility');
   }
-  if (answers.passThrough && normalizedTactics.length > 0 && normalizedTactics.every(t => PASS_THROUGH_DROP_TACTICS.has(t))) {
-    reasons.push('passThrough');
+  if (!answers.dataAtRest && normalizedTactics.length > 0 && normalizedTactics.every(t => NO_DATA_AT_REST_DROP_TACTICS.has(t))) {
+    reasons.push('dataAtRest');
   }
-  if (!answers.humanSurface && HUMAN_SURFACE_DENYLIST.some((prefix) => techniqueMatchesPrefix(techniqueId, prefix))) {
-    reasons.push('humanSurface');
+  if (!answers.userInteraction && USER_INTERACTION_DENYLIST.some((prefix) => techniqueMatchesPrefix(techniqueId, prefix))) {
+    reasons.push('userInteraction');
   }
   return reasons;
 }
 
 function getScenarioBoostMultiplier(tactics: string[], answers: ScenarioAnswers): number {
-  // Boost if ANY tactic triggers
   let multiplier = 1;
   const normalizedTactics = new Set(tactics.map(normalizeTacticKey));
-  if (answers.publicFacing && normalizedTactics.has('initial access')) {
+  if (answers.internetExposed && normalizedTactics.has('initial access')) {
     multiplier *= 2.0;
   }
-  if (answers.authHandling && normalizedTactics.has('credential access')) {
+  if (answers.managesCredentials && normalizedTactics.has('credential access')) {
     multiplier *= 2.0;
   }
-  if (answers.crownJewel && normalizedTactics.has('impact')) {
+  if (answers.highImpact && normalizedTactics.has('impact')) {
+    multiplier *= 1.5;
+  }
+  if (answers.sensitiveData && (normalizedTactics.has('collection') || normalizedTactics.has('exfiltration'))) {
     multiplier *= 1.5;
   }
   return multiplier;
@@ -2248,9 +2260,9 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     });
 
     const excludedByReason: Record<ScenarioDropReason, string[]> = {
-      blackBox: [],
-      passThrough: [],
-      humanSurface: [],
+      processVisibility: [],
+      dataAtRest: [],
+      userInteraction: [],
     };
 
     // Check if we have any strategy data — if not, use community-score fallback
@@ -2349,9 +2361,9 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   ]);
 
   const scenarioExcludedCounts = useMemo(() => ({
-    blackBox: scenarioTechniqueInsights.excludedByReason.blackBox.length,
-    passThrough: scenarioTechniqueInsights.excludedByReason.passThrough.length,
-    humanSurface: scenarioTechniqueInsights.excludedByReason.humanSurface.length,
+    processVisibility: scenarioTechniqueInsights.excludedByReason.processVisibility.length,
+    dataAtRest: scenarioTechniqueInsights.excludedByReason.dataAtRest.length,
+    userInteraction: scenarioTechniqueInsights.excludedByReason.userInteraction.length,
   }), [scenarioTechniqueInsights.excludedByReason]);
 
   const totalScenarioExcluded = useMemo(() => {
@@ -2407,9 +2419,9 @@ export function ProductView({ product, onBack }: ProductViewProps) {
 
   const excludedTechniquesByReason = useMemo(() => {
     const result: Record<ScenarioDropReason, string[]> = {
-      blackBox: [...scenarioTechniqueInsights.excludedByReason.blackBox].sort((a, b) => a.localeCompare(b)),
-      passThrough: [...scenarioTechniqueInsights.excludedByReason.passThrough].sort((a, b) => a.localeCompare(b)),
-      humanSurface: [...scenarioTechniqueInsights.excludedByReason.humanSurface].sort((a, b) => a.localeCompare(b)),
+      processVisibility: [...scenarioTechniqueInsights.excludedByReason.processVisibility].sort((a, b) => a.localeCompare(b)),
+      dataAtRest: [...scenarioTechniqueInsights.excludedByReason.dataAtRest].sort((a, b) => a.localeCompare(b)),
+      userInteraction: [...scenarioTechniqueInsights.excludedByReason.userInteraction].sort((a, b) => a.localeCompare(b)),
     };
     return result;
   }, [scenarioTechniqueInsights.excludedByReason]);
@@ -4267,12 +4279,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     lines.push(`- Technique filter: ${selectedTechniques.length > 0 ? selectedTechniques.join(', ') : 'None'}`);
     lines.push(`- Data Component filter: ${selectedDataComponents.length > 0 ? selectedDataComponents.join(', ') : 'None'}`);
     lines.push(`- Community source filter: ${selectedSources.length > 0 ? selectedSources.join(', ') : 'None'}`);
-    lines.push(`- Scenario filter enabled: ${scenarioFilterEnabled ? 'Yes' : 'No'}`);
+    lines.push(`- Deployment profile filter enabled: ${scenarioFilterEnabled ? 'Yes' : 'No'}`);
     if (scenarioFilterEnabled) {
       lines.push(`- Scenario max techniques: ${scenarioShowAll ? 'All ranked' : scenarioMaxTechniques}`);
       lines.push(`- Scenario answers: ${Object.entries(scenarioAnswers).map(([key, value]) => `${SCENARIO_QUESTION_LABELS[key as ScenarioQuestionKey]}=${value ? 'Yes' : 'No'}`).join(', ')}`);
       lines.push(`- Scenario manual overrides: ${scenarioOverrideTechniqueIds.size > 0 ? Array.from(scenarioOverrideTechniqueIds).join(', ') : 'None'}`);
-      lines.push(`- Scenario exclusions: ${totalScenarioExcluded} unique (Black Box ${scenarioExcludedCounts.blackBox}, Pass-Through ${scenarioExcludedCounts.passThrough}, Human Surface ${scenarioExcludedCounts.humanSurface})`);
+      lines.push(`- Profile exclusions: ${totalScenarioExcluded} unique (No Process Visibility ${scenarioExcludedCounts.processVisibility}, No Stored Data ${scenarioExcludedCounts.dataAtRest}, No User Interaction ${scenarioExcludedCounts.userInteraction})`);
       if (scenarioTechniqueInsights.scoredEntries.length > 0) {
         lines.push('');
         lines.push('### Technique Scores');
@@ -4383,9 +4395,9 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     productKey,
     productTitle,
     scenarioAnswers,
-    scenarioExcludedCounts.blackBox,
-    scenarioExcludedCounts.humanSurface,
-    scenarioExcludedCounts.passThrough,
+    scenarioExcludedCounts.processVisibility,
+    scenarioExcludedCounts.dataAtRest,
+    scenarioExcludedCounts.userInteraction,
     scenarioFilterEnabled,
     scenarioMaxTechniques,
     scenarioOverrideTechniqueIds,
@@ -4658,13 +4670,13 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                   <div>
                     <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
                       <Filter className="w-4 h-4 text-primary" />
-                      Scenario Technique Filter (Asset DNA)
+                      Deployment Profile Filter
                       <Popover>
                         <PopoverTrigger asChild>
                           <button
                             type="button"
                             className="inline-flex items-center justify-center rounded-md p-1 text-muted-foreground hover:text-foreground hover:bg-muted"
-                            aria-label="Scenario filter info"
+                            aria-label="Deployment profile filter info"
                             data-testid="button-scenario-filter-info"
                           >
                             <Info className="w-3.5 h-3.5" />
@@ -4673,10 +4685,12 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                         <PopoverContent align="start" className="w-[34rem] max-h-[32rem] overflow-auto">
                           <div className="space-y-3">
                             <div>
-                              <div className="text-sm font-semibold text-foreground">How The Boolean Filter Works</div>
+                              <div className="text-sm font-semibold text-foreground">How This Filter Works</div>
                               <p className="text-xs text-muted-foreground mt-1">
-                                Uses 6 yes/no questions to rank and optionally reduce mapped techniques. Hard drops remove inapplicable
-                                technique families, tactic boosts prioritize likely attack paths, then top-N or full ranked mode is applied.
+                                Each question describes a property of this product's deployment. Based on your answers, techniques are
+                                scored and ranked: irrelevant technique families are dropped (e.g., persistence techniques for a black-box appliance),
+                                while likely attack paths are boosted (e.g., Initial Access for internet-exposed products). You can view
+                                all ranked techniques or limit to the top N.
                               </p>
                             </div>
 
@@ -4703,7 +4717,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                       </Popover>
                     </h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                      Prioritize mapped techniques using 6 product traits. This filters STIX and community techniques together.
+                      Answer 6 questions about how this product is deployed to rank techniques by relevance and remove inapplicable ones.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -4770,7 +4784,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                     variant="ghost"
                     onClick={() => setScenarioAnswers(inferScenarioAnswers(productTitle, allPlatforms))}
                   >
-                    Reset Suggested Answers
+                    Auto-detect from product
                   </Button>
                 </div>
 
@@ -4784,7 +4798,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                     </Badge>
                     {totalScenarioExcluded > 0 && (
                       <Badge variant="outline" className="text-xs">
-                        Excluded {totalScenarioExcluded} (Black Box {scenarioExcludedCounts.blackBox}, Pass-Through {scenarioExcludedCounts.passThrough}, Human Surface {scenarioExcludedCounts.humanSurface})
+                        Excluded {totalScenarioExcluded} (No Process Visibility {scenarioExcludedCounts.processVisibility}, No Stored Data {scenarioExcludedCounts.dataAtRest}, No User Interaction {scenarioExcludedCounts.userInteraction})
                       </Badge>
                     )}
                     {tacticDiversityWarning && (
