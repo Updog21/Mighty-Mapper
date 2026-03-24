@@ -322,8 +322,14 @@ export class SigmaAdapter implements ResourceAdapter {
         mappingMethod = 'explicit_attack_id';
         ruleTechniqueIds.forEach((techniqueId) => techniquesSet.add(techniqueId));
       } else if (inferredFromDataComponent && ruleTechniqueIds.size > 0) {
-        coverageKind = 'visibility';
-        evidenceTier = 'medium';
+        // When a single DC fans out to many techniques, downgrade confidence
+        if (ruleTechniqueIds.size > 15) {
+          coverageKind = 'candidate';
+          evidenceTier = 'weak';
+        } else {
+          coverageKind = 'visibility';
+          evidenceTier = 'medium';
+        }
         mappingMethod = 'tactic_data_component_inference';
       }
 
@@ -345,7 +351,7 @@ export class SigmaAdapter implements ResourceAdapter {
         requiresValidation: true,
         metadata: {
           log_sources: this.formatLogSources(item.logsource),
-          query: item.detection || undefined,
+          query: item.detection ? JSON.stringify(item.detection, null, 2) : undefined,
           caveats: item.falsepositives && item.falsepositives.length > 0 ? item.falsepositives : undefined,
           matched_data_components: Array.from(matchedDataComponents),
           missing_tactic_for_inference: missingTacticForInference || undefined,
@@ -496,8 +502,12 @@ export class SigmaAdapter implements ResourceAdapter {
   private extractTagIds(tags?: string[]): string[] {
     if (!tags) return [];
     return tags
-      .filter(t => t.match(/^attack\.t\d{4}/i))
-      .map(t => t.replace('attack.', '').toUpperCase());
+      .filter(t => t.match(/^attack\.(technique\.)?t\d{4}/i))
+      .map(t => {
+        const match = t.match(/(t\d{4}(?:\.\d{3})?)/i);
+        return match ? match[1].toUpperCase() : '';
+      })
+      .filter(Boolean);
   }
 
   private extractTactic(tags?: string[]): string | null {

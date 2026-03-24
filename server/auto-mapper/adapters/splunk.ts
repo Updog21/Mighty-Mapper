@@ -273,7 +273,7 @@ export class SplunkAdapter implements ResourceAdapter {
         mappingMethod,
         evidenceTier,
         coverageKind,
-        requiresValidation: explicitTechniqueIds.size > 0,
+        requiresValidation: true,
         metadata: {
           log_sources: detection.data_source,
           query: detection.search,
@@ -392,6 +392,15 @@ export class SplunkAdapter implements ResourceAdapter {
     const search = detection.search || '';
     const sourcetypeMatch = search.match(/\bsourcetype\s*=\s*("?)([^"\s]+)\1/i);
     if (sourcetypeMatch?.[2]) return sourcetypeMatch[2];
+
+    const sourceMatch = search.match(/\bsource\s*=\s*("?)([^"\s]+)\1/i);
+    if (sourceMatch?.[2]) return sourceMatch[2];
+
+    const eventtypeMatch = search.match(/\beventtype\s*=\s*("?)([^"\s]+)\1/i);
+    if (eventtypeMatch?.[2]) return eventtypeMatch[2];
+
+    const tstatsMatch = search.match(/\|\s*tstats\s+.*?\bfrom\s+datamodel\s*=\s*("?)([^"\s]+)\1/i);
+    if (tstatsMatch?.[2]) return tstatsMatch[2];
 
     const indexMatch = search.match(/\bindex\s*=\s*("?)([^"\s]+)\1/i);
     if (indexMatch?.[2]) return indexMatch[2];

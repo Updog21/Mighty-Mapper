@@ -423,6 +423,11 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
         if (cached) {
           resolveMappingStreams(resourceType, cached);
           if (cached.analytics.length > 0 || cached.dataComponents.length > 0) {
+            // Validate any analytics from cache that were never validated
+            const hasUnvalidated = cached.analytics.some(a => a.requiresValidation && !a.validationStatus);
+            if (hasUnvalidated && (resourceType === 'sigma' || resourceType === 'splunk' || resourceType === 'elastic' || resourceType === 'azure')) {
+              await validateAnalytics(cached.analytics, productName);
+            }
             const status = hasPublishedTechniqueCoverage(cached) ? 'matched' : 'partial';
             await saveMappingResult(productId, resourceType, status, cached, versionMetadata);
             return { resourceType, mapping: cached, matched: status === 'matched' };
@@ -808,7 +813,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
   const combinedMapping = combineAllMappings(
     productId,
     [...allMappings, ...partialMappings],
-    successfulSources
+    combinedSources
   );
   
   return {

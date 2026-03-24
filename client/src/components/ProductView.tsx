@@ -301,15 +301,16 @@ function inferScenarioAnswers(productName: string, platforms: string[]): Scenari
 
 function getScenarioDropReasons(
   techniqueId: string,
-  tactic: string,
+  tactics: string[],
   answers: ScenarioAnswers
 ): ScenarioDropReason[] {
   const reasons: ScenarioDropReason[] = [];
-  const normalizedTactic = normalizeTacticKey(tactic);
-  if (answers.blackBox && BLACK_BOX_DROP_TACTICS.has(normalizedTactic)) {
+  const normalizedTactics = tactics.map(normalizeTacticKey);
+  // Only drop if ALL tactics trigger the drop — a technique is relevant if any tactic is
+  if (answers.blackBox && normalizedTactics.length > 0 && normalizedTactics.every(t => BLACK_BOX_DROP_TACTICS.has(t))) {
     reasons.push('blackBox');
   }
-  if (answers.passThrough && PASS_THROUGH_DROP_TACTICS.has(normalizedTactic)) {
+  if (answers.passThrough && normalizedTactics.length > 0 && normalizedTactics.every(t => PASS_THROUGH_DROP_TACTICS.has(t))) {
     reasons.push('passThrough');
   }
   if (!answers.humanSurface && HUMAN_SURFACE_DENYLIST.some((prefix) => techniqueMatchesPrefix(techniqueId, prefix))) {
@@ -318,16 +319,17 @@ function getScenarioDropReasons(
   return reasons;
 }
 
-function getScenarioBoostMultiplier(tactic: string, answers: ScenarioAnswers): number {
-  const normalizedTactic = normalizeTacticKey(tactic);
+function getScenarioBoostMultiplier(tactics: string[], answers: ScenarioAnswers): number {
+  // Boost if ANY tactic triggers
   let multiplier = 1;
-  if (answers.publicFacing && normalizedTactic === 'initial access') {
+  const normalizedTactics = new Set(tactics.map(normalizeTacticKey));
+  if (answers.publicFacing && normalizedTactics.has('initial access')) {
     multiplier *= 2.0;
   }
-  if (answers.authHandling && normalizedTactic === 'credential access') {
+  if (answers.authHandling && normalizedTactics.has('credential access')) {
     multiplier *= 2.0;
   }
-  if (answers.crownJewel && normalizedTactic === 'impact') {
+  if (answers.crownJewel && normalizedTactics.has('impact')) {
     multiplier *= 1.5;
   }
   return multiplier;
@@ -1311,6 +1313,20 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     };
   }, [coverageTacticMap, techniqueIndex, techniqueTacticMap, remoteTacticMap]);
 
+  const resolveAllTactics = useMemo(() => {
+    return (techniqueId: string, tactics?: string[]): string[] => {
+      if (Array.isArray(tactics) && tactics.length > 0) return tactics;
+      const normalized = normalizeTechniqueId(techniqueId);
+      const remote = remoteTacticMap.get(normalized);
+      if (remote && remote.length > 0) return remote;
+      const indexed = techniqueIndex.get(normalized);
+      if (indexed?.tactics && indexed.tactics.length > 0) return indexed.tactics;
+      // Fall back to single tactic resolution
+      const single = resolveTacticName(normalized);
+      return single && single !== 'Unknown' ? [single] : [];
+    };
+  }, [resolveTacticName, techniqueIndex, remoteTacticMap]);
+
   const resolveTechniqueDescription = useMemo(() => {
     return (techniqueId: string, description?: string) => {
       if (description) return description;
@@ -2237,11 +2253,15 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       humanSurface: [],
     };
 
+    // Check if we have any strategy data — if not, use community-score fallback
+    const hasAnyStrategies = Array.from(metrics.values()).some(m => m.strategyCount > 0);
+
     const scoredEntries = Array.from(metrics.entries())
       .map(([techniqueId, metric]) => {
         const normalizedTechniqueId = normalizeTechniqueId(techniqueId);
-        const tactic = resolveTacticName(normalizedTechniqueId);
-        let dropReasons = getScenarioDropReasons(normalizedTechniqueId, tactic, scenarioAnswers);
+        const allTactics = resolveAllTactics(normalizedTechniqueId);
+        const tactic = allTactics[0] || resolveTacticName(normalizedTechniqueId);
+        let dropReasons = getScenarioDropReasons(normalizedTechniqueId, allTactics.length > 0 ? allTactics : [tactic], scenarioAnswers);
         if (dropReasons.length > 0 && scenarioOverrideTechniqueIds.has(normalizedTechniqueId)) {
           dropReasons = [];
         }
@@ -2250,7 +2270,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         const strategyNorm = metric.strategyCount / maxStrategyCount;
         const analyticNorm = metric.analyticCount / maxAnalyticCount;
         const dcNorm = metric.dataComponents.size / maxDataComponents;
-        const rawBase = (0.4 * strategyNorm) + (0.3 * analyticNorm) + (0.3 * dcNorm);
+        // When no strategies exist (Sigma/Splunk-only products), use analytic+DC as baseline
+        const rawBase = hasAnyStrategies
+          ? (0.4 * strategyNorm) + (0.3 * analyticNorm) + (0.3 * dcNorm)
+          : (0.5 * analyticNorm) + (0.5 * dcNorm);
 
         // Mutable-field fidelity: 0.5–1.0 based on verified DC overlap (Spec §6.3)
         let fidelity = 1.0;
@@ -2261,8 +2284,11 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         }
 
         const baseScore = rawBase * fidelity;
-        const killWeight = getTacticWeight(tactic);
-        const dnaBoost = getScenarioBoostMultiplier(tactic, scenarioAnswers);
+        // Use max tactic weight across all tactics for this technique
+        const killWeight = allTactics.length > 0
+          ? Math.max(...allTactics.map(getTacticWeight))
+          : getTacticWeight(tactic);
+        const dnaBoost = getScenarioBoostMultiplier(allTactics.length > 0 ? allTactics : [tactic], scenarioAnswers);
         const finalScore = baseScore * killWeight * dnaBoost;
 
         return {
@@ -2287,7 +2313,9 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     const limitedTechniqueIds = scenarioFilterEnabled && !scenarioShowAll
       ? rankedTechniqueIds.slice(0, Math.max(1, scenarioMaxTechniques))
       : rankedTechniqueIds;
-    const allowedSet = new Set<string>(scenarioFilterEnabled ? limitedTechniqueIds : rankedTechniqueIds);
+    // If filtering drops everything, bypass to avoid a blank view
+    const effectiveIds = scenarioFilterEnabled ? limitedTechniqueIds : rankedTechniqueIds;
+    const allowedSet = new Set<string>(effectiveIds.length > 0 ? effectiveIds : rankedTechniqueIds);
     const rankByTechnique = new Map<string, number>();
     rankedTechniqueIds.forEach((id, index) => rankByTechnique.set(id, index));
 
@@ -2307,6 +2335,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     autoMapping.enrichedMapping?.detectionStrategies,
     coverageData?.coverage,
     resolveTacticName,
+    resolveAllTactics,
     scenarioAnswers,
     scenarioFilterEnabled,
     verifiedEvidence,

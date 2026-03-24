@@ -565,7 +565,9 @@ export async function registerRoutes(
 
         const requiredDataComponents = Array.from(new Set(Array.from(requiredDcByKey.values()))).sort((a, b) => a.localeCompare(b));
         const requiredCount = requiredDataComponents.length;
-        const matchedCount = matchedRequiredDataComponents.length;
+        // Deduplicate matched DCs before counting to avoid inflating the threshold check
+        const dedupedMatched = Array.from(new Set(matchedRequiredDataComponents));
+        const matchedCount = dedupedMatched.length;
         const requirementCoverageRatio = requiredCount > 0 ? matchedCount / requiredCount : 0;
 
         let status: TechniqueAssessmentStatus = "candidate";
@@ -588,7 +590,7 @@ export async function registerRoutes(
           scoreValue,
           mappedDataComponents: mappedList,
           requiredDataComponents,
-          matchedRequiredDataComponents: Array.from(new Set(matchedRequiredDataComponents)).sort((a, b) => a.localeCompare(b)),
+          matchedRequiredDataComponents: dedupedMatched.sort((a, b) => a.localeCompare(b)),
           requirementCoverageRatio: Number(requirementCoverageRatio.toFixed(3)),
         };
       };

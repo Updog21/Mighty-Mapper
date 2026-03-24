@@ -1823,10 +1823,15 @@ export class MitreKnowledgeGraph {
     });
 
     if (!targetDcStixId) {
-      // Data component not found - try partial match
+      // Data component not found - try partial match, prefer shortest (most specific) name
+      let bestLen = Infinity;
       this.dataComponentMap.forEach((dc, stixId) => {
-        if (dc.name.toLowerCase().includes(dcNameLower) || dcNameLower.includes(dc.name.toLowerCase())) {
-          targetDcStixId = stixId;
+        const dcLower = dc.name.toLowerCase();
+        if (dcLower.includes(dcNameLower) || dcNameLower.includes(dcLower)) {
+          if (dc.name.length < bestLen) {
+            bestLen = dc.name.length;
+            targetDcStixId = stixId;
+          }
         }
       });
     }
@@ -1937,9 +1942,15 @@ export class MitreKnowledgeGraph {
     });
 
     if (!targetDcStixId) {
+      // Partial match fallback — prefer shortest (most specific) matching name
+      let bestLen = Infinity;
       this.dataComponentMap.forEach((dc, stixId) => {
-        if (dc.name.toLowerCase().includes(dcNameLower) || dcNameLower.includes(dc.name.toLowerCase())) {
-          targetDcStixId = stixId;
+        const dcLower = dc.name.toLowerCase();
+        if (dcLower.includes(dcNameLower) || dcNameLower.includes(dcLower)) {
+          if (dc.name.length < bestLen) {
+            bestLen = dc.name.length;
+            targetDcStixId = stixId;
+          }
         }
       });
     }

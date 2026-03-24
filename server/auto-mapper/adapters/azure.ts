@@ -170,7 +170,10 @@ export class AzureAdapter implements ResourceAdapter {
 
       const connectorIds = collectValues(doc, 'connectorId');
       const dataTypes = collectValues(doc, 'dataTypes');
-      const relevantTechniques = normalizeArray(doc.relevantTechniques);
+      const relevantTechniques = Array.from(new Set([
+        ...normalizeArray(doc.relevantTechniques),
+        ...collectValues(doc, 'relevantTechniques'),
+      ]));
       const columnNames = collectValues(doc, 'columnName');
       const tactics = Array.from(new Set([
         ...collectValues(doc, 'tactics'),
