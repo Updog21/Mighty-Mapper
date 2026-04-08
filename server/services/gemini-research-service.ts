@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { settingsService } from "./settings-service";
 import { buildGroundedConfig } from "./gemini-config";
+import { aiProviderService, toGeminiCompatibleResponse } from "./ai-provider-service";
 import { PLATFORM_VALUES, normalizePlatformList } from "../../shared/platforms";
 import { z } from "zod";
 
@@ -41,6 +42,7 @@ export interface ResearchEnrichmentInput {
 
 export interface ResearchEnrichmentResult {
   model: string;
+  provider?: "gemini" | "openai";
   results: ResearchResultEntry[];
   platformSuggestions?: ResearchPlatformSuggestion[];
   sources: Array<{ title?: string; url: string }>;
@@ -82,6 +84,7 @@ export interface PlatformAlternativeResult {
 
 export interface PlatformCheckResult {
   model: string;
+  provider?: "gemini" | "openai";
   suggestedPlatforms?: string[];
   validation: PlatformValidationResult[];
   alternativePlatformsFound: PlatformAlternativeResult[];
@@ -90,6 +93,7 @@ export interface PlatformCheckResult {
 }
 
 const DEFAULT_MODEL = "gemini-1.5-flash";
+type AiGenerationClient = GoogleGenAI | { provider: "openai"; apiKey: string };
 
 const ALLOWED_PLATFORMS = PLATFORM_VALUES;
 
@@ -316,28 +320,70 @@ const IAAS_NEGATIVE_SIGNALS = [
 ];
 
 export class GeminiResearchService {
-  private client: GoogleGenAI | null = null;
+  private client: AiGenerationClient | null = null;
   private clientKey: string | null = null;
   private modelName: string | null = null;
 
   private async getClient() {
+    const provider = await aiProviderService.getActiveProvider();
+    if (provider === "openai") {
+      const apiKey = await settingsService.getOpenAIKey();
+      if (!apiKey) return null;
+      const modelName = (await settingsService.getOpenAIModel()).trim() || "gpt-4o-mini";
+      const cacheKey = `${provider}:${apiKey}:${modelName}`;
+      if (this.client && this.clientKey === cacheKey && this.modelName === modelName) {
+        return { client: this.client, modelName, provider };
+      }
+
+      this.client = { provider: "openai", apiKey };
+      this.clientKey = cacheKey;
+      this.modelName = modelName;
+      return { client: this.client, modelName, provider };
+    }
+
     const apiKey = await settingsService.getGeminiKey();
     if (!apiKey) return null;
     const modelName = (await settingsService.getGeminiModel()).trim() || DEFAULT_MODEL;
-    if (this.client && this.clientKey === apiKey && this.modelName === modelName) {
-      return { client: this.client, modelName };
+    const cacheKey = `${provider}:${apiKey}:${modelName}`;
+    if (this.client && this.clientKey === cacheKey && this.modelName === modelName) {
+      return { client: this.client, modelName, provider };
     }
 
     this.client = new GoogleGenAI({ apiKey });
-    this.clientKey = apiKey;
+    this.clientKey = cacheKey;
     this.modelName = modelName;
-    return { client: this.client, modelName };
+    return { client: this.client, modelName, provider };
   }
 
-  private async generateWithGroundingFallback(client: GoogleGenAI, modelName: string, prompt: string) {
+  private async generateWithGroundingFallback(client: AiGenerationClient, modelName: string, prompt: string) {
+    if ("provider" in client && client.provider === "openai") {
+      try {
+        const response = await aiProviderService.generateOpenAIResponse({
+          apiKey: client.apiKey,
+          modelName,
+          prompt,
+          grounded: true,
+        });
+        return { response: toGeminiCompatibleResponse(response), fallbackNote: response.fallbackNote };
+      } catch (error) {
+        const groundedMessage = error instanceof Error ? error.message : String(error);
+        const response = await aiProviderService.generateOpenAIResponse({
+          apiKey: client.apiKey,
+          modelName,
+          prompt,
+          grounded: false,
+        });
+        return {
+          response: toGeminiCompatibleResponse(response),
+          fallbackNote: `OpenAI web search was unavailable; result generated without web search. ${groundedMessage}`,
+        };
+      }
+    }
+
+    const geminiClient = client as GoogleGenAI;
     const groundedConfig = await buildGroundedConfig() as any;
     const run = async (config: any) => (
-      client.models.generateContent({
+      geminiClient.models.generateContent({
         model: modelName,
         contents: prompt,
         config,
@@ -1277,7 +1323,7 @@ Return JSON only with these top-level keys (do not add top-level fields).
   async enrichLogSources(input: ResearchEnrichmentInput): Promise<ResearchEnrichmentResult | null> {
     const clientInfo = await this.getClient();
     if (!clientInfo || !this.modelName) return null;
-    const { client, modelName } = clientInfo;
+    const { client, modelName, provider } = clientInfo;
 
     const aliasList = Array.isArray(input.aliases)
       ? input.aliases.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
@@ -1286,6 +1332,7 @@ Return JSON only with these top-level keys (do not add top-level fields).
     if (!baseName) {
       return {
         model: this.modelName,
+        provider,
         results: input.dataComponents.map((dc) => ({
           dcId: dc.id,
           dcName: dc.name,
@@ -1474,6 +1521,7 @@ Return JSON only with these top-level keys (do not add top-level fields).
 
     return {
       model: this.modelName,
+      provider,
       results,
       platformSuggestions,
       sources,
@@ -1487,7 +1535,7 @@ Return JSON only with these top-level keys (do not add top-level fields).
   async suggestPlatforms(input: PlatformCheckInput): Promise<PlatformCheckResult | null> {
     const clientInfo = await this.getClient();
     if (!clientInfo || !this.modelName) return null;
-    const { client, modelName } = clientInfo;
+    const { client, modelName, provider } = clientInfo;
 
     const aliasList = Array.isArray(input.aliases)
       ? input.aliases.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
@@ -1496,6 +1544,7 @@ Return JSON only with these top-level keys (do not add top-level fields).
     if (!baseName) {
       return {
         model: this.modelName,
+        provider,
         validation: [],
         alternativePlatformsFound: [],
         sources: [],
@@ -1618,6 +1667,7 @@ Return JSON only with these top-level keys (do not add top-level fields).
     
     return {
       model: this.modelName,
+      provider,
       suggestedPlatforms,
       validation,
       alternativePlatformsFound,

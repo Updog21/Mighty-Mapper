@@ -106,7 +106,7 @@ export default function AdminTasks() {
     setSigmaSync({ status: 'running', message: 'Refreshing Sigma rules...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/refresh-sigma', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/refresh-sigma', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to refresh Sigma rules');
       }
@@ -129,7 +129,7 @@ export default function AdminTasks() {
     setStixInit({ status: 'running', message: 'Syncing MITRE data...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/refresh-mitre', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/refresh-mitre', { method: 'POST', credentials: 'include' });
 
       if (!response.ok) {
         throw new Error('Failed to sync MITRE data');
@@ -153,7 +153,7 @@ export default function AdminTasks() {
     setSplunkSync({ status: 'running', message: 'Refreshing Splunk rules...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/refresh-splunk', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/refresh-splunk', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to refresh Splunk rules');
       }
@@ -176,7 +176,7 @@ export default function AdminTasks() {
     setElasticSync({ status: 'running', message: 'Refreshing Elastic rules...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/refresh-elastic', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/refresh-elastic', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to refresh Elastic rules');
       }
@@ -199,7 +199,7 @@ export default function AdminTasks() {
     setAzureSync({ status: 'running', message: 'Refreshing Azure Sentinel rules...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/refresh-azure', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/refresh-azure', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to refresh Azure Sentinel rules');
       }
@@ -222,7 +222,7 @@ export default function AdminTasks() {
     setCtidSync({ status: 'running', message: 'Refreshing CTID mappings...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/refresh-ctid', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/refresh-ctid', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to refresh CTID mappings');
       }
@@ -245,7 +245,7 @@ export default function AdminTasks() {
     setDetectionsIndex({ status: 'running', message: 'Rebuilding detections index...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/rebuild-detections-index', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/rebuild-detections-index', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to rebuild detections index');
       }
@@ -268,7 +268,7 @@ export default function AdminTasks() {
     setDbSeed({ status: 'running', message: 'Seeding database...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/db-seed', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/db-seed', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to run db:seed');
       }
@@ -289,7 +289,7 @@ export default function AdminTasks() {
     setDbPush({ status: 'running', message: 'Applying schema changes...', progress: 30 });
 
     try {
-      const response = await fetch('/api/admin/maintenance/db-push', { method: 'POST' });
+      const response = await fetch('/api/admin/maintenance/db-push', { method: 'POST', credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to run db:push');
       }
@@ -325,6 +325,7 @@ export default function AdminTasks() {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ alias: nextValue }),
+        credentials: 'include',
       });
       if (!response.ok) {
         throw new Error('Failed to update alias');
@@ -345,7 +346,7 @@ export default function AdminTasks() {
 
   const fetchGeminiStatus = async () => {
     try {
-      const response = await fetch('/api/admin/ai-keys/gemini');
+      const response = await fetch('/api/admin/ai-keys/gemini', { credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to fetch Gemini key status');
       }
@@ -375,6 +376,7 @@ export default function AdminTasks() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey }),
+        credentials: 'include',
       });
       if (!response.ok) {
         const payload = await response.json();
@@ -403,6 +405,7 @@ export default function AdminTasks() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model }),
+        credentials: 'include',
       });
       if (!response.ok) {
         const payload = await response.json();
@@ -438,6 +441,7 @@ export default function AdminTasks() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        credentials: 'include',
       });
       if (!response.ok) {
         const payload = await response.json();
@@ -464,6 +468,7 @@ export default function AdminTasks() {
           apiKey: geminiKeyInput.trim() || undefined,
           model: geminiModelInput.trim() || undefined,
         }),
+        credentials: 'include',
       });
       const payload = await response.json();
       if (!response.ok) {

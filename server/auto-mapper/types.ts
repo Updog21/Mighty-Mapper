@@ -58,7 +58,7 @@ export interface DataComponentMapping {
 
 export interface ResourceAdapter {
   name: ResourceType;
-  fetchMappings(productName: string, vendor: string): Promise<NormalizedMapping | null>;
+  fetchMappings(productName: string, vendor: string, platforms?: string[]): Promise<NormalizedMapping | null>;
   isApplicable(productType: string, platforms: string[]): boolean;
 }
 

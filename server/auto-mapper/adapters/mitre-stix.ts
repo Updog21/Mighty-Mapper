@@ -1,6 +1,7 @@
 import { ResourceAdapter, NormalizedMapping, AnalyticMapping, DataComponentMapping } from '../types';
 import { fetchWithTimeout } from '../../utils/fetch';
 import { mitreKnowledgeGraph } from '../../mitre-stix/knowledge-graph';
+import { platformMatchesAny } from '../../../shared/platforms';
 
 const MITRE_STIX_URL = 'https://raw.githubusercontent.com/mitre-attack/attack-stix-data/master/enterprise-attack/enterprise-attack.json';
 
@@ -27,18 +28,18 @@ export class MitreStixAdapter implements ResourceAdapter {
     return true;
   }
 
-  async fetchMappings(productName: string, vendor: string): Promise<NormalizedMapping | null> {
+  async fetchMappings(productName: string, vendor: string, platforms?: string[]): Promise<NormalizedMapping | null> {
     const stixData = await this.getStixData();
     if (!stixData) return null;
 
-    const relatedObjects = this.findRelatedObjects(stixData, productName, vendor);
+    const relatedObjects = this.findRelatedObjects(stixData, productName, vendor, platforms);
 
     if (relatedObjects.length === 0) {
       return null;
     }
 
     await mitreKnowledgeGraph.ensureInitialized();
-    return this.normalizeMappings(productName, relatedObjects);
+    return this.normalizeMappings(productName, relatedObjects, platforms);
   }
 
   private async getStixData(): Promise<STIXObject[] | null> {
@@ -56,55 +57,46 @@ export class MitreStixAdapter implements ResourceAdapter {
     }
   }
 
-  private findRelatedObjects(stixData: STIXObject[], productName: string, vendor: string): STIXObject[] {
+  private matchesPlatforms(objectPlatforms: string[] | undefined, targetPlatforms?: string[]): boolean {
+    if (!targetPlatforms || targetPlatforms.length === 0) return true;
+    if (!objectPlatforms || objectPlatforms.length === 0) return true;
+    return platformMatchesAny(objectPlatforms, targetPlatforms);
+  }
+
+  private findRelatedObjects(stixData: STIXObject[], productName: string, vendor: string, targetPlatforms?: string[]): STIXObject[] {
     const searchTerms = [
       productName.toLowerCase(),
       vendor.toLowerCase(),
       ...productName.toLowerCase().split(/\s+/),
     ];
 
-    const assetMappings: Record<string, string[]> = {
-      'firewall': ['network', 'firewall', 'perimeter'],
-      'switch': ['network', 'switch', 'infrastructure'],
-      'router': ['network', 'router', 'infrastructure'],
-      'server': ['server', 'host', 'endpoint'],
-      'workstation': ['workstation', 'desktop', 'endpoint'],
-      'database': ['database', 'sql', 'data'],
-      'web server': ['web', 'http', 'iis', 'apache', 'nginx'],
-      'mail server': ['email', 'mail', 'exchange', 'smtp'],
-      'domain controller': ['active directory', 'ldap', 'domain', 'authentication'],
-      'vpn': ['vpn', 'remote access', 'tunnel'],
-    };
-
     const relatedTerms = new Set<string>(searchTerms);
-    for (const [asset, terms] of Object.entries(assetMappings)) {
-      if (searchTerms.some(t => terms.includes(t) || asset.includes(t))) {
-        terms.forEach(term => relatedTerms.add(term));
-      }
-    }
 
-    const dataComponents = stixData.filter(obj => 
+    const dataComponents = stixData.filter(obj =>
       obj.type === 'x-mitre-data-component' &&
+      this.matchesPlatforms(obj.x_mitre_platforms, targetPlatforms) &&
       obj.name &&
-      Array.from(relatedTerms).some(term => 
+      Array.from(relatedTerms).some(term =>
         obj.name!.toLowerCase().includes(term) ||
         obj.description?.toLowerCase().includes(term)
       )
     );
 
-    const dataSources = stixData.filter(obj => 
+    const dataSources = stixData.filter(obj =>
       obj.type === 'x-mitre-data-source' &&
+      this.matchesPlatforms(obj.x_mitre_platforms, targetPlatforms) &&
       obj.name &&
-      Array.from(relatedTerms).some(term => 
+      Array.from(relatedTerms).some(term =>
         obj.name!.toLowerCase().includes(term) ||
         obj.description?.toLowerCase().includes(term)
       )
     );
 
-    const assets = stixData.filter(obj => 
+    const assets = stixData.filter(obj =>
       obj.type === 'x-mitre-asset' &&
+      this.matchesPlatforms(obj.x_mitre_platforms, targetPlatforms) &&
       obj.name &&
-      Array.from(relatedTerms).some(term => 
+      Array.from(relatedTerms).some(term =>
         obj.name!.toLowerCase().includes(term) ||
         obj.description?.toLowerCase().includes(term)
       )
@@ -113,7 +105,18 @@ export class MitreStixAdapter implements ResourceAdapter {
     return [...dataComponents, ...dataSources, ...assets];
   }
 
-  private normalizeMappings(productId: string, objects: STIXObject[]): NormalizedMapping {
+  private buildAnalyticPlatforms(objectPlatforms: string[] | undefined, techniquePlatforms: string[][]): string[] | undefined {
+    const combined = new Set<string>();
+    (objectPlatforms || []).forEach((platform) => combined.add(platform));
+    techniquePlatforms.forEach((platforms) => {
+      platforms.forEach((platform) => combined.add(platform));
+    });
+    return combined.size > 0
+      ? Array.from(combined).sort((a, b) => a.localeCompare(b))
+      : undefined;
+  }
+
+  private normalizeMappings(productId: string, objects: STIXObject[], targetPlatforms?: string[]): NormalizedMapping {
     const analytics: AnalyticMapping[] = [];
     const dataComponents: DataComponentMapping[] = [];
 
@@ -130,17 +133,24 @@ export class MitreStixAdapter implements ResourceAdapter {
         // Infer technique IDs from the matched data component via knowledge graph
         const dcName = obj.name || '';
         const inferredTechniques = dcName
-          ? mitreKnowledgeGraph.getTechniquesByDataComponentName(dcName)
+          ? mitreKnowledgeGraph.getTechniquesByDataComponentName(dcName).filter((technique) =>
+              this.matchesPlatforms(technique.platforms, targetPlatforms)
+            )
           : [];
         const techniqueIds = inferredTechniques.map(t => t.id);
         const hasInferred = techniqueIds.length > 0;
         // Downgrade when a broad DC fans out to many techniques
         const isBroadFanOut = techniqueIds.length > 15;
+        const analyticPlatforms = this.buildAnalyticPlatforms(
+          obj.x_mitre_platforms,
+          inferredTechniques.map((technique) => technique.platforms || [])
+        );
 
         analytics.push({
           id: `MITRE-${externalId || obj.id}`,
           name: `Monitor ${obj.name}`,
           techniqueIds,
+          platforms: analyticPlatforms,
           description: obj.description,
           source: 'mitre_stix',
           mappingMethod: hasInferred ? 'stream_data_component_inference' : 'mitre_keyword_match',
@@ -166,6 +176,7 @@ export class MitreStixAdapter implements ResourceAdapter {
         analytics.push({
           id: `MITRE-ASSET-${externalId || obj.id}`,
           name: `Asset: ${obj.name}`,
+          platforms: obj.x_mitre_platforms,
           description: obj.description,
           source: 'mitre_stix',
           mappingMethod: 'mitre_keyword_match',

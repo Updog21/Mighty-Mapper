@@ -9,11 +9,24 @@ export const mappingStatusEnum = ['matched', 'partial', 'ai_pending', 'not_found
 export type MappingStatus = typeof mappingStatusEnum[number];
 export const resourceTypeEnum = ['ctid', 'sigma', 'elastic', 'splunk', 'azure', 'mitre_stix'] as const;
 export type ResourceType = typeof resourceTypeEnum[number];
+export const userRoleEnum = ['admin', 'user', 'viewer'] as const;
+export type UserRole = typeof userRoleEnum[number];
 export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
+  role: text("role").notNull().default("user"),
+  requirePasswordChange: boolean("require_password_change").notNull().default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+export const userSessions = pgTable("user_sessions", {
+  sid: varchar("sid").primaryKey(),
+  sess: jsonb("sess").notNull(),
+  expire: timestamp("expire", { precision: 6 }).notNull(),
+}, (table) => [
+  index("user_sessions_expire_idx").on(table.expire),
+]);
 
 export const settings = pgTable("settings", {
   id: serial("id").primaryKey(),
@@ -40,6 +53,7 @@ export const products = pgTable("products", {
   logoPath: text("logo_path"),  // Path to product logo image
   hybridSelectorType: text("hybrid_selector_type"),
   hybridSelectorValues: text("hybrid_selector_values").array(),
+  createdBy: varchar("created_by").references(() => users.id),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 export const dataComponents = pgTable("data_components", {
@@ -156,7 +170,9 @@ export const productMappings = pgTable("product_mappings", {
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  uniqueProductResourceIdx: uniqueIndex("product_mappings_product_resource_idx").on(table.productId, table.resourceType),
+}));
 
 export const ssmCapabilities = pgTable("ssm_capabilities", {
   id: serial("id").primaryKey(),
@@ -220,6 +236,8 @@ export const edges = pgTable("edges", {
 export const insertUserSchema = createInsertSchema(users).pick({
   username: true,
   password: true,
+  role: true,
+  requirePasswordChange: true,
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({
@@ -229,6 +247,7 @@ export const insertSettingsSchema = createInsertSchema(settings).omit({
 
 export const insertProductSchema = createInsertSchema(products).omit({
   id: true,
+  createdBy: true,
   createdAt: true,
 });
 

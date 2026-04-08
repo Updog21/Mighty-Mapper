@@ -3,3 +3,8 @@ dist
 .git
 .env
 *.log
+logs.txt
+*.md
+screens/
+attached_assets/
+*.png

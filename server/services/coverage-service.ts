@@ -127,11 +127,11 @@ export async function getGlobalCoverage(
         AND n.type = 'technique'
         AND n.attributes->>'externalId' = sm.technique_id
       WHERE sc.product_id = ${productId}
-        AND sm.score_category = ANY(${sql`${scoreCategories}::text[]`})
+        AND sm.score_category IN (${sql.join(scoreCategories.map((s) => sql`${s}`), sql`, `)})
         ${platformList.length > 0
-          ? sql`AND lower(sc.platform) = ANY(${sql`${platformList}::text[]`})`
+          ? sql`AND lower(sc.platform) IN (${sql.join(platformList.map((p) => sql`${p}`), sql`, `)})`
           : sql``}
-      GROUP BY sm.technique_id, technique_name
+      GROUP BY sm.technique_id, COALESCE(n.name, sm.technique_name)
       ORDER BY technique_id;
     `);
 
@@ -151,11 +151,11 @@ export async function getGlobalCoverage(
       AND n.dataset_version = ${mitreDatasetVersion}
       AND n.type = 'technique'
       AND n.attributes->>'externalId' = sm.technique_id
-    WHERE sm.score_category = ANY(${sql`${scoreCategories}::text[]`})
+    WHERE sm.score_category IN (${sql.join(scoreCategories.map((s) => sql`${s}`), sql`, `)})
       ${platformList.length > 0
-        ? sql`AND lower(sc.platform) = ANY(${sql`${platformList}::text[]`})`
+        ? sql`AND lower(sc.platform) IN (${sql.join(platformList.map((p) => sql`${p}`), sql`, `)})`
         : sql``}
-    GROUP BY sm.technique_id, technique_name
+    GROUP BY sm.technique_id, COALESCE(n.name, sm.technique_name)
     ORDER BY technique_id;
   `);
 

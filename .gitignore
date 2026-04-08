@@ -1,2 +1,6 @@
 .env
+node_modules/
+dist/
+logs.txt
+*.log
 node_modules/typescript/tsbuildinfo

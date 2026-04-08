@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
 import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { StixExportControls } from '@/components/StixExportControls';
@@ -18,6 +19,7 @@ export default function Techniques() {
   const [location] = useLocation();
   const [selectedPlatform, setSelectedPlatform] = useState<string>('All Platforms');
   const [expandedTactics, setExpandedTactics] = useState<Set<string>>(new Set());
+  const [showDescriptions, setShowDescriptions] = useState<boolean>(false);
 
   const normalizedSelection = useMemo(() => (
     selectedPlatform === 'All Platforms'
@@ -131,6 +133,62 @@ export default function Techniques() {
     return lines.join('\n');
   }, [filteredTechniques.length, groupedByTactic, selectedPlatform, techniqueFilter]);
 
+  function renderDescription(text: string) {
+    if (!text) return 'No description provided.';
+    const codeRegex = /<code>([\s\S]*?)<\/code>/gi;
+    const urlRegex = /(https?:\/\/[^\s)]+)/g;
+
+    const parts: Array<string | ReactNode> = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    // Extract <code> blocks and surrounding text
+    while ((match = codeRegex.exec(text)) !== null) {
+      const idx = match.index ?? 0;
+      if (idx > lastIndex) {
+        parts.push(text.slice(lastIndex, idx));
+      }
+      const inner = match[1] ?? '';
+      parts.push(
+        <code key={`code-${idx}`} className="px-1 rounded bg-muted/30 font-mono text-[0.85em]">
+          {inner}
+        </code>
+      );
+      lastIndex = idx + match[0].length;
+    }
+    if (lastIndex < text.length) {
+      parts.push(text.slice(lastIndex));
+    }
+
+    // Linkify URLs in string segments only
+    const linked: Array<string | ReactNode> = [];
+    parts.forEach((node, i) => {
+      if (typeof node !== 'string') {
+        linked.push(node);
+        return;
+      }
+      let cursor = 0;
+      let urlMatch: RegExpExecArray | null;
+      while ((urlMatch = urlRegex.exec(node)) !== null) {
+        const mi = urlMatch.index ?? 0;
+        if (mi > cursor) {
+          linked.push(node.slice(cursor, mi));
+        }
+        const url = urlMatch[1];
+        linked.push(
+          <a key={`url-${i}-${mi}`} href={url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+            {url}
+          </a>
+        );
+        cursor = mi + url.length;
+      }
+      if (cursor < node.length) {
+        linked.push(node.slice(cursor));
+      }
+    });
+
+    return <span className="whitespace-pre-wrap">{linked}</span>;
+  }
+
   return (
     <AppShell contentClassName="space-y-6">
             <header>
@@ -207,11 +265,19 @@ export default function Techniques() {
 
             <Card className="bg-card/50 backdrop-blur border-border">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Target className="w-5 h-5 text-primary" />
-                  Technique Catalog
-                </CardTitle>
-                <CardDescription>Techniques synchronized from MITRE STIX</CardDescription>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Target className="w-5 h-5 text-primary" />
+                      Technique Catalog
+                    </CardTitle>
+                    <CardDescription>Techniques synchronized from MITRE STIX</CardDescription>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground select-none">
+                    <span>Show descriptions</span>
+                    <Switch checked={showDescriptions} onCheckedChange={setShowDescriptions} />
+                  </label>
+                </div>
               </CardHeader>
               <CardContent>
                 {isLoading ? (
@@ -251,7 +317,7 @@ export default function Techniques() {
                                 type="button"
                                 className="w-full p-4 flex items-center justify-between text-left hover:bg-muted/20 transition-colors"
                               >
-                                <div className="flex items-center gap-2 min-w-0">
+                                <div className="flex items-start gap-2 min-w-0">
                                   <h3 className="text-base font-normal text-foreground">{group.tactic}</h3>
                                   <Badge variant="secondary" className="text-xs">
                                     {group.items.length}
@@ -272,13 +338,18 @@ export default function Techniques() {
                                     href={`/techniques/${encodeURIComponent(technique.id)}`}
                                     className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-muted/20 transition-colors border-b border-border/40 last:border-b-0"
                                   >
-                                    <div className="min-w-0">
+                                    <div className="min-w-0 pr-3">
                                       <p className="text-sm font-normal text-foreground truncate">{technique.name}</p>
                                       <p className="text-xs text-muted-foreground mt-0.5">
                                         {Array.isArray(technique.platforms) && technique.platforms.length > 0
                                           ? technique.platforms.join(', ')
                                           : 'No platform tags'}
                                       </p>
+                                      {showDescriptions && (
+                                        <div className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                                          {renderDescription(technique.description)}
+                                        </div>
+                                      )}
                                     </div>
                                     <Badge variant="outline" className={`ml-3 text-xs ${subjectIdPillClass('technique')}`}>
                                       {technique.id}

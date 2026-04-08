@@ -77,7 +77,7 @@ export interface SystemStatus {
 // ============================================================
 
 async function fetchAllProducts(): Promise<Product[]> {
-  const response = await fetch('/api/admin/products');
+  const response = await fetch('/api/admin/products', { credentials: 'include' });
   if (!response.ok) {
     throw new Error('Failed to fetch products');
   }
@@ -85,7 +85,7 @@ async function fetchAllProducts(): Promise<Product[]> {
 }
 
 async function searchProductsApi(query: string): Promise<Product[]> {
-  const response = await fetch(`/api/admin/products/search?q=${encodeURIComponent(query)}`);
+  const response = await fetch(`/api/admin/products/search?q=${encodeURIComponent(query)}`, { credentials: 'include' });
   if (!response.ok) {
     throw new Error('Failed to search products');
   }
@@ -101,7 +101,7 @@ async function fetchProductById(productId: string): Promise<Product> {
 }
 
 async function resolveSearchTermsApi(query: string): Promise<ResolvedSearchTerms> {
-  const response = await fetch(`/api/admin/products/resolve/${encodeURIComponent(query)}`);
+  const response = await fetch(`/api/admin/products/resolve/${encodeURIComponent(query)}`, { credentials: 'include' });
   if (!response.ok) {
     throw new Error('Could not resolve product');
   }
@@ -109,7 +109,7 @@ async function resolveSearchTermsApi(query: string): Promise<ResolvedSearchTerms
 }
 
 async function fetchAllAliases(): Promise<ProductAlias[]> {
-  const response = await fetch('/api/admin/aliases');
+  const response = await fetch('/api/admin/aliases', { credentials: 'include' });
   if (!response.ok) {
     throw new Error('Failed to fetch aliases');
   }
@@ -117,7 +117,7 @@ async function fetchAllAliases(): Promise<ProductAlias[]> {
 }
 
 async function fetchSystemStatus(): Promise<SystemStatus> {
-  const response = await fetch('/api/admin/status');
+  const response = await fetch('/api/admin/status', { credentials: 'include' });
   if (!response.ok) {
     throw new Error('Failed to fetch system status');
   }
@@ -138,10 +138,11 @@ interface CreateProductInput {
 }
 
 async function createProductApi(product: CreateProductInput): Promise<Product> {
-  const response = await fetch('/api/admin/products', {
+  const response = await fetch('/api/products', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(product)
+    body: JSON.stringify(product),
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -161,7 +162,8 @@ async function addAliasApi(input: AddAliasInput): Promise<ProductAlias> {
   const response = await fetch('/api/admin/aliases', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input)
+    body: JSON.stringify(input),
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -172,7 +174,8 @@ async function addAliasApi(input: AddAliasInput): Promise<ProductAlias> {
 
 async function deleteAliasApi(aliasId: number): Promise<void> {
   const response = await fetch(`/api/admin/aliases/${aliasId}`, {
-    method: 'DELETE'
+    method: 'DELETE',
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -181,8 +184,9 @@ async function deleteAliasApi(aliasId: number): Promise<void> {
 }
 
 async function deleteProductApi(productId: string): Promise<void> {
-  const response = await fetch(`/api/admin/products/${encodeURIComponent(productId)}`, {
+  const response = await fetch(`/api/products/${encodeURIComponent(productId)}`, {
     method: 'DELETE',
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();

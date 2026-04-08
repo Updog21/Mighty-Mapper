@@ -1,7 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useLocation } from 'wouter';
 import { AppShell } from '@/components/AppShell';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Switch } from '@/components/ui/switch';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { StixExportControls } from '@/components/StixExportControls';
@@ -17,6 +18,7 @@ export default function DetectionStrategies() {
   const { data: systemStatus } = useSystemStatus();
   const [location] = useLocation();
   const [expandedStrategies, setExpandedStrategies] = useState<Set<string>>(new Set());
+  const [showDescriptions, setShowDescriptions] = useState<boolean>(false);
 
   const strategyFilter = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -129,6 +131,60 @@ export default function DetectionStrategies() {
     return lines.join('\n');
   }, [strategyFilter, visibleStrategies]);
 
+  function renderDescription(text: string) {
+    if (!text) return 'No description provided.';
+    const codeRegex = /<code>([\s\S]*?)<\/code>/gi;
+    const urlRegex = /(https?:\/\/[^\s)]+)/g;
+
+    const parts: Array<string | ReactNode> = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = codeRegex.exec(text)) !== null) {
+      const idx = match.index ?? 0;
+      if (idx > lastIndex) {
+        parts.push(text.slice(lastIndex, idx));
+      }
+      const inner = match[1] ?? '';
+      parts.push(
+        <code key={`code-${idx}`} className="px-1 rounded bg-muted/30 font-mono text-[0.85em]">
+          {inner}
+        </code>
+      );
+      lastIndex = idx + match[0].length;
+    }
+    if (lastIndex < text.length) {
+      parts.push(text.slice(lastIndex));
+    }
+
+    const linked: Array<string | ReactNode> = [];
+    parts.forEach((node, i) => {
+      if (typeof node !== 'string') {
+        linked.push(node);
+        return;
+      }
+      let cursor = 0;
+      let urlMatch: RegExpExecArray | null;
+      while ((urlMatch = urlRegex.exec(node)) !== null) {
+        const mi = urlMatch.index ?? 0;
+        if (mi > cursor) {
+          linked.push(node.slice(cursor, mi));
+        }
+        const url = urlMatch[1];
+        linked.push(
+          <a key={`url-${i}-${mi}`} href={url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+            {url}
+          </a>
+        );
+        cursor = mi + url.length;
+      }
+      if (cursor < node.length) {
+        linked.push(node.slice(cursor));
+      }
+    });
+
+    return <span className="whitespace-pre-wrap">{linked}</span>;
+  }
+
   return (
     <AppShell contentClassName="space-y-6">
             <header>
@@ -181,11 +237,19 @@ export default function DetectionStrategies() {
 
             <Card className="bg-card/50 backdrop-blur border-border">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Shield className="w-5 h-5 text-primary" />
-                  Strategy Catalog
-                </CardTitle>
-                <CardDescription>Detection strategies synchronized from MITRE STIX</CardDescription>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <Shield className="w-5 h-5 text-primary" />
+                      Strategy Catalog
+                    </CardTitle>
+                    <CardDescription>Detection strategies synchronized from MITRE STIX</CardDescription>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground select-none">
+                    <span>Show descriptions</span>
+                    <Switch checked={showDescriptions} onCheckedChange={setShowDescriptions} />
+                  </label>
+                </div>
               </CardHeader>
               <CardContent>
                 {isLoading ? (
@@ -228,7 +292,7 @@ export default function DetectionStrategies() {
                                 type="button"
                                 className="flex w-full items-start justify-between gap-3 p-4 text-left transition-colors hover:bg-muted/20"
                               >
-                                <div className="min-w-0 flex-1">
+                                <div className="min-w-0 flex-1 pr-3">
                                   <div className="flex items-start justify-between gap-3">
                                     <h3 className="text-base font-normal text-foreground leading-tight">
                                       {strategy.name}
@@ -237,6 +301,11 @@ export default function DetectionStrategies() {
                                       {strategy.strategyId}
                                     </Badge>
                                   </div>
+                                  {showDescriptions && (
+                                    <div className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                                      {renderDescription(strategy.description || '')}
+                                    </div>
+                                  )}
                                 </div>
                                 {isExpanded ? (
                                   <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />

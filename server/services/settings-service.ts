@@ -136,6 +136,10 @@ export class SettingsService {
   async getOpenAIKey(): Promise<string> {
     return this.get("openai_api_key");
   }
+
+  async getOpenAIModel(): Promise<string> {
+    return this.get("openai_model", process.env.OPENAI_MODEL || "gpt-4o-mini");
+  }
 }
 
 export const settingsService = new SettingsService();

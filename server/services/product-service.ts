@@ -171,6 +171,7 @@ export class ProductService {
         logoPath: products.logoPath,
         hybridSelectorType: products.hybridSelectorType,
         hybridSelectorValues: products.hybridSelectorValues,
+        createdBy: products.createdBy,
         createdAt: products.createdAt,
       })
       .from(productAliases)

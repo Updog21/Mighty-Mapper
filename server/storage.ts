@@ -29,11 +29,14 @@ export interface IStorage {
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
+  listUsers(): Promise<Omit<User, 'password'>[]>;
+  updateUserRole(id: string, role: string): Promise<User | undefined>;
+  deleteUser(id: string): Promise<boolean>;
   
   // Product operations
   searchProducts(query: string): Promise<Product[]>;
   getProductById(productId: string): Promise<Product | undefined>;
-  createProduct(product: InsertProduct): Promise<Product>;
+  createProduct(product: InsertProduct, createdBy?: string): Promise<Product>;
   bulkCreateProducts(productList: InsertProduct[]): Promise<void>;
   
   // Data Component operations
@@ -83,6 +86,24 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
+  async listUsers(): Promise<Omit<User, 'password'>[]> {
+    const result = await db
+      .select({ id: users.id, username: users.username, role: users.role, requirePasswordChange: users.requirePasswordChange, createdAt: users.createdAt })
+      .from(users)
+      .orderBy(users.createdAt);
+    return result;
+  }
+
+  async updateUserRole(id: string, role: string): Promise<User | undefined> {
+    const result = await db.update(users).set({ role }).where(eq(users.id, id)).returning();
+    return result[0];
+  }
+
+  async deleteUser(id: string): Promise<boolean> {
+    const result = await db.delete(users).where(eq(users.id, id)).returning();
+    return result.length > 0;
+  }
+
   // Product operations
   async searchProducts(query: string): Promise<Product[]> {
     const searchTerm = `%${query.toLowerCase()}%`;
@@ -103,13 +124,14 @@ export class PostgresStorage implements IStorage {
     return result[0];
   }
 
-  async createProduct(product: InsertProduct): Promise<Product> {
+  async createProduct(product: InsertProduct, createdBy?: string): Promise<Product> {
     const normalizedPlatforms = Array.isArray(product.platforms)
       ? normalizePlatformList(product.platforms)
       : [];
     const result = await db.insert(products).values({
       ...product,
       platforms: normalizedPlatforms,
+      ...(createdBy ? { createdBy } : {}),
     }).returning();
     return result[0];
   }

@@ -436,7 +436,7 @@ export async function runAutoMapper(productId: string): Promise<MappingResult> {
           return { resourceType, mapping: null, matched: false };
         }
 
-        const mapping = await adapter.fetchMappings(productName, vendor);
+        const mapping = await adapter.fetchMappings(productName, vendor, targetPlatforms);
 
         if (mapping && (mapping.analytics.length > 0 || mapping.dataComponents.length > 0)) {
           resolveMappingStreams(resourceType, mapping);

@@ -336,7 +336,7 @@ export default function PathBuilder() {
       const params = new URLSearchParams();
       params.set('productId', selectedProductId);
       params.set('scope', 'detection');
-      const response = await fetch(`/api/graph/coverage?${params.toString()}`);
+      const response = await fetch(`/api/graph/coverage?${params.toString()}`, { credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to fetch product coverage');
       }
@@ -355,7 +355,7 @@ export default function PathBuilder() {
       if (selectedTechniqueList.length > 0) {
         params.set('techniques', selectedTechniqueList.join(','));
       }
-      const response = await fetch(`/api/graph/coverage/paths?${params.toString()}`);
+      const response = await fetch(`/api/graph/coverage/paths?${params.toString()}`, { credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to fetch coverage paths');
       }
@@ -368,7 +368,7 @@ export default function PathBuilder() {
     queryKey: ['path-builder-streams', selectedProductId],
     enabled: Boolean(selectedProductId),
     queryFn: async () => {
-      const response = await fetch(`/api/products/${encodeURIComponent(selectedProductId)}/streams`);
+      const response = await fetch(`/api/products/${encodeURIComponent(selectedProductId)}/streams`, { credentials: 'include' });
       if (!response.ok) {
         throw new Error('Failed to fetch product streams');
       }
@@ -455,6 +455,7 @@ export default function PathBuilder() {
           techniqueIds: techniquesForMapping,
           platforms: selectedProduct?.platforms || undefined,
         }),
+        credentials: 'include',
       });
       if (!response.ok) {
         throw new Error('Failed to fetch STIX mapping details');
@@ -1083,6 +1084,7 @@ export default function PathBuilder() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ streams: normalizedStreams }),
+        credentials: 'include',
       });
 
       if (!response.ok) {

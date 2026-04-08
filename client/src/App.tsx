@@ -3,6 +3,8 @@ import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { useAuth } from "@/hooks/useAuth";
+import Login from "@/pages/Login";
 import Dashboard from "@/pages/Dashboard";
 import AIMapper from "@/pages/AIMapper";
 import Products from "@/pages/Products";
@@ -16,6 +18,7 @@ import Detections from "@/pages/Detections";
 import Techniques from "@/pages/Techniques";
 import TechniqueDetail from "@/pages/TechniqueDetail";
 import PathBuilder from "@/pages/PathBuilder";
+import UsersPage from "@/pages/Users";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -35,16 +38,35 @@ function Router() {
       <Route path="/threats" component={Threats} />
       <Route path="/settings" component={Settings} />
       <Route path="/admin" component={AdminTasks} />
+      <Route path="/users" component={UsersPage} />
       <Route component={NotFound} />
     </Switch>
   );
+}
+
+function AuthGate() {
+  const { user, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background">
+        <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Login />;
+  }
+
+  return <Router />;
 }
 
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ErrorBoundary>
-        <Router />
+        <AuthGate />
       </ErrorBoundary>
       <Toaster />
     </QueryClientProvider>

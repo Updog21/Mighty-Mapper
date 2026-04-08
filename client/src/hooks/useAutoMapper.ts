@@ -106,7 +106,7 @@ export interface MappingResult {
 }
 
 async function fetchMappingStatus(productId: string): Promise<MappingResult | null> {
-  const response = await fetch(`/api/auto-mapper/mappings/${productId}`);
+  const response = await fetch(`/api/auto-mapper/mappings/${productId}`, { credentials: 'include' });
   if (response.status === 404) {
     return null;
   }
@@ -119,6 +119,7 @@ async function fetchMappingStatus(productId: string): Promise<MappingResult | nu
 async function runAutoMapper(productId: string): Promise<MappingResult> {
   const response = await fetch(`/api/auto-mapper/run/${productId}`, {
     method: 'POST',
+    credentials: 'include',
   });
   if (!response.ok) {
     throw new Error('Failed to run auto-mapper');

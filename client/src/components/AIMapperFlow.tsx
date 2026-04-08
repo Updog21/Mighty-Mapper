@@ -326,7 +326,7 @@ async function fetchPlatforms(): Promise<MitrePlatformsResponse> {
 }
 
 async function fetchProduct(productId: string) {
-  const response = await fetch(`/api/products/${encodeURIComponent(productId)}`);
+  const response = await fetch(`/api/products/${encodeURIComponent(productId)}`, { credentials: 'include' });
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to fetch product');
@@ -361,10 +361,11 @@ async function createProduct(payload: {
   dataComponentIds: string[];
   source: 'custom' | 'wizard_draft';
 }) {
-  const response = await fetch('/api/admin/products?autoMap=false', {
+  const response = await fetch('/api/products?autoMap=false', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -374,7 +375,7 @@ async function createProduct(payload: {
 }
 
 async function deleteProduct(productId: string) {
-  const response = await fetch(`/api/admin/products/${encodeURIComponent(productId)}`, {
+  const response = await fetch(`/api/products/${encodeURIComponent(productId)}`, {
     method: 'DELETE',
   });
   if (!response.ok) {
@@ -388,6 +389,7 @@ async function addAlias(productDbId: number, alias: string) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ productId: productDbId, alias, confidence: 100 }),
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -411,6 +413,7 @@ async function updateProduct(
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json().catch(() => ({}));
@@ -424,6 +427,7 @@ async function saveProductStreams(productId: string, streams: StreamDraft[]) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ streams }),
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -440,6 +444,7 @@ async function saveWizardCoverage(
   const response = await fetch('/api/wizard/coverage', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({
       productId,
       platforms,
@@ -460,6 +465,7 @@ async function saveWizardCoverage(
 async function runAutoMapper(productId: string) {
   const response = await fetch(`/api/auto-mapper/run/${encodeURIComponent(productId)}`, {
     method: 'POST',
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -734,6 +740,7 @@ async function updateMappingMetadata(mappingId: number, metadata: Record<string,
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ metadata }),
+    credentials: 'include',
   });
   if (!response.ok) {
     const error = await response.json();
@@ -1625,6 +1632,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       const response = await fetch('/api/ai/research/platforms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           vendor,
           product,
@@ -1723,6 +1731,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       const response = await fetch('/api/ai/gemini/data-components', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           vendor,
           product,
@@ -1839,6 +1848,7 @@ export function AIMapperFlow({ initialQuery, existingProductId, mode = 'create',
       const response = await fetch('/api/ai/research/log-sources', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({
           vendor,
           product,

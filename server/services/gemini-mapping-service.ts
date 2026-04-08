@@ -4,6 +4,7 @@ import addFormats from "ajv-formats";
 import crypto from "crypto";
 import { settingsService } from "./settings-service";
 import { buildGroundedConfig } from "./gemini-config";
+import { aiProviderService, toGeminiCompatibleResponse } from "./ai-provider-service";
 import { normalizePlatformList } from "../../shared/platforms";
 import { mitreKnowledgeGraph } from "../mitre-stix/knowledge-graph";
 import decisionSchema from "../schemas/gemini-mapping-decision.schema.json";
@@ -66,6 +67,8 @@ export interface GeminiKeyTestResult {
 
 export interface GeminiMappingMetrics {
   pipelineMode: GeminiPipelineMode;
+  provider?: "gemini" | "openai";
+  model?: string;
   legacyLatencyMs?: number;
   optimizedLatencyMs?: number;
   selectedParity?: boolean;
@@ -79,6 +82,7 @@ export interface GeminiMappingMetrics {
 
 type GeminiPipelineMode = "legacy" | "shadow" | "optimized";
 type TriageBucket = "HARD_NO" | "LIKELY" | "MAYBE";
+type AiGenerationClient = GoogleGenAI | { provider: "openai"; apiKey: string };
 
 const DEFAULT_MODEL = "gemini-1.5-flash";
 const MAX_CANDIDATES_PER_PROMPT = 24;
@@ -281,7 +285,7 @@ const normalizeDecision = (
 };
 
 export class GeminiMappingService {
-  private client: GoogleGenAI | null = null;
+  private client: AiGenerationClient | null = null;
   private clientKey: string | null = null;
   private modelName: string | null = null;
   private promptCacheByKey = new Map<string, string>();
@@ -397,17 +401,34 @@ export class GeminiMappingService {
   }
 
   private async getClient() {
+    const provider = await aiProviderService.getActiveProvider();
+    if (provider === "openai") {
+      const apiKey = await settingsService.getOpenAIKey();
+      if (!apiKey) return null;
+      const modelName = (await settingsService.getOpenAIModel()).trim() || "gpt-4o-mini";
+      const cacheKey = `${provider}:${apiKey}:${modelName}`;
+      if (this.client && this.clientKey === cacheKey && this.modelName === modelName) {
+        return { client: this.client, modelName, provider };
+      }
+
+      this.client = { provider: "openai", apiKey };
+      this.clientKey = cacheKey;
+      this.modelName = modelName;
+      return { client: this.client, modelName, provider };
+    }
+
     const apiKey = await settingsService.getGeminiKey();
     if (!apiKey) return null;
     const modelName = (await settingsService.getGeminiModel()).trim() || DEFAULT_MODEL;
-    if (this.client && this.clientKey === apiKey && this.modelName === modelName) {
-      return { client: this.client, modelName };
+    const cacheKey = `${provider}:${apiKey}:${modelName}`;
+    if (this.client && this.clientKey === cacheKey && this.modelName === modelName) {
+      return { client: this.client, modelName, provider };
     }
 
     this.client = new GoogleGenAI({ apiKey });
-    this.clientKey = apiKey;
+    this.clientKey = cacheKey;
     this.modelName = modelName;
-    return { client: this.client, modelName };
+    return { client: this.client, modelName, provider };
   }
 
   private buildPrompt(input: GeminiMappingInput): string {
@@ -880,7 +901,7 @@ ${allLines}
   }
 
   private async applyCoverageClosure(
-    client: GoogleGenAI,
+    client: AiGenerationClient,
     modelName: string,
     input: GeminiMappingInput,
     result: GeminiMappingResult
@@ -1038,16 +1059,52 @@ ${allLines}
   }
 
   private async generateWithRetries(
-    client: GoogleGenAI,
+    client: AiGenerationClient,
     modelName: string,
     contents: string,
     config: Record<string, unknown>
   ): Promise<any> {
+    if ("provider" in client && client.provider === "openai") {
+      const grounded = Array.isArray((config as any)?.tools) && (config as any).tools.length > 0;
+      let lastOpenAiError: unknown = null;
+      for (let attempt = 0; attempt < MAX_REQUEST_ATTEMPTS; attempt += 1) {
+        try {
+          let generated;
+          try {
+            generated = await aiProviderService.generateOpenAIResponse({
+              apiKey: client.apiKey,
+              modelName,
+              prompt: contents,
+              grounded,
+            });
+          } catch (error) {
+            if (!grounded) throw error;
+            generated = await aiProviderService.generateOpenAIResponse({
+              apiKey: client.apiKey,
+              modelName,
+              prompt: contents,
+              grounded: false,
+            });
+          }
+          return toGeminiCompatibleResponse(generated);
+        } catch (error) {
+          lastOpenAiError = error;
+          if (attempt < MAX_REQUEST_ATTEMPTS - 1 && isTransientRequestError(error)) {
+            await wait(REQUEST_RETRY_DELAY_MS * (attempt + 1));
+            continue;
+          }
+          throw error;
+        }
+      }
+      if (lastOpenAiError) throw lastOpenAiError;
+    }
+
+    const geminiClient = client as GoogleGenAI;
     let response: any;
     let lastError: unknown = null;
     for (let requestAttempt = 0; requestAttempt < MAX_REQUEST_ATTEMPTS; requestAttempt += 1) {
       try {
-        response = await client.models.generateContent({
+        response = await geminiClient.models.generateContent({
           model: modelName,
           contents,
           config: config as any,
@@ -1070,7 +1127,7 @@ ${allLines}
   }
 
   private async runLegacyMapping(
-    client: GoogleGenAI,
+    client: AiGenerationClient,
     modelName: string,
     input: GeminiMappingInput
   ): Promise<GeminiMappingResult> {
@@ -1427,7 +1484,7 @@ ${allLines}
   async suggestDataComponents(input: GeminiMappingInput): Promise<GeminiMappingResult | null> {
     const clientInfo = await this.getClient();
     if (!clientInfo) return null;
-    const { client, modelName } = clientInfo;
+    const { client, modelName, provider } = clientInfo;
 
     try {
       const candidateList = Array.isArray(input.candidates) ? input.candidates : [];
@@ -1442,6 +1499,26 @@ ${allLines}
         };
       }
 
+      if (provider === "openai") {
+        const result = await this.applyCoverageClosure(
+          client,
+          modelName,
+          input,
+          await this.runLegacyMapping(client, modelName, input)
+        );
+        result.notes = [
+          result.notes || "",
+          "Generated with OpenAI/ChatGPT provider; Gemini optimized cache pipeline is not used for this provider.",
+        ].filter(Boolean).join(" ");
+        result.metrics = {
+          ...result.metrics,
+          pipelineMode: "legacy",
+          provider: "openai",
+          model: modelName,
+        };
+        return result;
+      }
+
       const mode = await this.getPipelineMode();
       if (mode === "legacy") {
         const result = await this.applyCoverageClosure(
@@ -1453,6 +1530,8 @@ ${allLines}
         result.metrics = {
           ...result.metrics,
           pipelineMode: "legacy",
+          provider: "gemini",
+          model: modelName,
         };
         return result;
       }
@@ -1467,10 +1546,10 @@ ${allLines}
         let optimizedResult: GeminiMappingResult | null = null;
         try {
           optimizedResult = await this.applyCoverageClosure(
-            client,
+            client as GoogleGenAI,
             modelName,
             input,
-            await this.runOptimizedMapping(client, modelName, input)
+            await this.runOptimizedMapping(client as GoogleGenAI, modelName, input)
           );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -1485,6 +1564,8 @@ ${allLines}
           ].filter(Boolean).join(" ");
           legacyResult.metrics = {
             pipelineMode: "shadow",
+            provider: "gemini",
+            model: modelName,
             legacyLatencyMs: legacyResult.metrics?.legacyLatencyMs,
             optimizedLatencyMs: optimizedResult.metrics?.optimizedLatencyMs,
             selectedParity: parity.parity,
@@ -1499,22 +1580,26 @@ ${allLines}
           legacyResult.metrics = {
             ...legacyResult.metrics,
             pipelineMode: "shadow",
+            provider: "gemini",
+            model: modelName,
           };
         }
         return legacyResult;
       }
 
       const optimizedResult = await this.applyCoverageClosure(
-        client,
+        client as GoogleGenAI,
         modelName,
         input,
-        await this.runOptimizedMapping(client, modelName, input)
+        await this.runOptimizedMapping(client as GoogleGenAI, modelName, input)
       );
       const requireParity = await this.requireLegacyParityGuard();
       if (!requireParity) {
         optimizedResult.metrics = {
           ...optimizedResult.metrics,
           pipelineMode: "optimized",
+          provider: "gemini",
+          model: modelName,
         };
         return optimizedResult;
       }
@@ -1533,6 +1618,8 @@ ${allLines}
         ].filter(Boolean).join(" ");
         legacyResult.metrics = {
           pipelineMode: "optimized",
+          provider: "gemini",
+          model: modelName,
           legacyLatencyMs: legacyResult.metrics?.legacyLatencyMs,
           optimizedLatencyMs: optimizedResult.metrics?.optimizedLatencyMs,
           selectedParity: false,
@@ -1552,6 +1639,8 @@ ${allLines}
       ].filter(Boolean).join(" ");
       optimizedResult.metrics = {
         pipelineMode: "optimized",
+        provider: "gemini",
+        model: modelName,
         legacyLatencyMs: legacyResult.metrics?.legacyLatencyMs,
         optimizedLatencyMs: optimizedResult.metrics?.optimizedLatencyMs,
         selectedParity: true,

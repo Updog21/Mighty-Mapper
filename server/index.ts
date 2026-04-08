@@ -3,12 +3,16 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { adminService } from "./services";
+import { setupAuth } from "./auth";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
+import { errorHandler } from "./middleware/error-handler";
+import { storage } from "./storage";
 
 const app = express();
-app.set("trust proxy", true);
+// Use a non-permissive trust proxy setting to satisfy express-rate-limit recommendations
+app.set("trust proxy", 1);
 
 // Security Headers
 app.use(helmet({
@@ -42,6 +46,17 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 app.use('/api/', limiter);
+
+// Stricter rate limit on auth endpoints to mitigate brute-force
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  message: 'Too many login attempts, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/auth/login', authLimiter);
+app.use('/api/auth/setup', authLimiter);
 
 const httpServer = createServer(app);
 
@@ -99,6 +114,16 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  await setupAuth(app);
+  try {
+    const existingAdmin = await storage.getUserByUsername("admin");
+    if (existingAdmin && existingAdmin.role !== "admin") {
+      await storage.updateUserRole(existingAdmin.id, "admin");
+      log('elevated "admin" user to admin role', 'Startup');
+    }
+  } catch (err) {
+    console.error('[Startup] Failed to enforce admin role:', err);
+  }
   await registerRoutes(httpServer, app);
   adminService.scheduleMitreSync();
   adminService.scheduleRepoSync();
@@ -113,13 +138,7 @@ app.use((req, res, next) => {
     console.error('[Startup] Failed to clean up stale wizard drafts:', error);
   });
 
-  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
-    const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-
-    res.status(status).json({ message });
-    throw err;
-  });
+  app.use(errorHandler);
 
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route

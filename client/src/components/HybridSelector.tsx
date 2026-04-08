@@ -61,6 +61,7 @@ async function updateProductHybridSelector(
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ hybridSelectorType: selectorType, hybridSelectorValues: selectorValues }),
+    credentials: 'include',
   });
   if (!response.ok) {
     const errorText = await response.text();

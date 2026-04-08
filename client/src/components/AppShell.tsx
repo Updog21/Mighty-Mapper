@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Link, useLocation } from "wouter";
+import { useAuth } from "@/hooks/useAuth";
 import {
   Activity,
   Bell,
@@ -8,7 +9,6 @@ import {
   ChevronDown,
   ChevronRight,
   Cpu,
-  Database,
   FileText,
   GitBranch,
   Layers,
@@ -18,7 +18,9 @@ import {
   Settings,
   Shield,
   Target,
+  Users,
   Wrench,
+  LogOut,
   type LucideIcon,
 } from "lucide-react";
 
@@ -43,7 +45,8 @@ const navSections: NavSection[] = [
     label: "Workspace",
     items: [
       { href: "/", label: "Coverage Map", icon: LayoutDashboard },
-      { href: "/products", label: "Security Stack", icon: Database },
+      { href: "/products", label: "Security Stack", icon: Shield },
+      { href: "/ai-mapper", label: "Auto Mapper", icon: Cpu },
       { href: "/path-builder", label: "Path Builder", icon: GitBranch },
     ],
   },
@@ -58,17 +61,17 @@ const navSections: NavSection[] = [
     ],
   },
   {
-    label: "Automation",
+    label: "Admin",
     items: [
-      { href: "/ai-mapper", label: "Auto Mapper", icon: Cpu },
       { href: "/admin", label: "Admin Tasks", icon: Wrench },
+      { href: "/settings", label: "Settings", icon: Settings },
+      { href: "/users", label: "Users", icon: Users },
     ],
   },
   {
     label: "Reference",
     items: [
       { href: "/documentation", label: "Documentation", icon: BookOpen },
-      { href: "/settings", label: "Settings", icon: Settings },
     ],
   },
 ];
@@ -76,13 +79,14 @@ const navSections: NavSection[] = [
 const initialSectionState: Record<string, boolean> = {
   Workspace: true,
   Intelligence: true,
-  Automation: true,
+  Admin: true,
   Reference: false,
 };
 
 const routeLabels: Array<{ match: (path: string) => boolean; label: string }> = [
   { match: (path) => path === "/", label: "Coverage Map" },
   { match: (path) => path.startsWith("/products"), label: "Security Stack" },
+  { match: (path) => path.startsWith("/users"), label: "Users" },
   { match: (path) => path.startsWith("/path-builder"), label: "Path Builder" },
   { match: (path) => path.startsWith("/techniques"), label: "Techniques" },
   { match: (path) => path.startsWith("/data-components"), label: "Data Components" },
@@ -195,24 +199,24 @@ function ShellSidebar({ currentPath }: { currentPath: string }) {
       </div>
 
       <div className="space-y-2 border-t border-border p-4">
-        <Link href="/settings">
-          <div className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground">
-            <Settings className="h-4 w-4" />
-            Settings
-          </div>
-        </Link>
-        <div className="flex items-center gap-3 px-2 py-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-secondary text-xs font-semibold text-primary">
-            MM
-          </div>
-          <div className="flex-1 overflow-hidden">
-            <p className="truncate text-sm font-medium">Local Workspace</p>
-            <p className="truncate text-xs text-muted-foreground">attack.mitre.org aligned</p>
-          </div>
-          <Shield className="h-4 w-4 text-primary" />
-        </div>
+        <SidebarLogout />
       </div>
     </div>
+  );
+}
+
+function SidebarLogout() {
+  const { logout } = useAuth();
+
+  return (
+    <button
+      type="button"
+      onClick={() => logout()}
+      className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-sm text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+    >
+      <LogOut className="h-4 w-4" />
+      Sign Out
+    </button>
   );
 }
 

@@ -48,6 +48,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { useDeleteProduct } from '@/hooks/useProducts';
 import { useToast } from '@/hooks/use-toast';
 import { normalizePlatformList, platformMatchesAny, type PlatformValue } from '@shared/platforms';
+import type { SsmMapping } from '@shared/schemas/ssm';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { StixExportControls } from '@/components/StixExportControls';
 
@@ -178,6 +179,8 @@ const SCENARIO_QUESTION_LABELS: Record<ScenarioQuestionKey, string> = {
   sensitiveData: 'This product stores sensitive data like PII, financial records, or health data',
 };
 
+const SCENARIO_QUESTION_COUNT = Object.keys(SCENARIO_QUESTION_LABELS).length;
+
 const SCENARIO_QUESTION_HELP: Record<ScenarioQuestionKey, string> = {
   processVisibility: 'YES for servers, workstations, or laptops where you have an EDR agent, Sysmon, or OS-level logging installed. NO for cloud services, SaaS apps, or network appliances where you can only see external behavior.',
   dataAtRest: 'YES for databases, file servers, endpoints, or any system that stores files, logs, or records. NO for firewalls, proxies, load balancers, or gateways that only inspect traffic passing through.',
@@ -191,8 +194,8 @@ const SCENARIO_QUESTION_HELP: Record<ScenarioQuestionKey, string> = {
 const SCENARIO_QUESTION_WHY: Record<ScenarioQuestionKey, string> = {
   processVisibility: 'Without OS-level access, techniques like process injection, registry persistence, and privilege escalation cannot be observed — they are removed from the ranking.',
   dataAtRest: 'If the product only sees traffic in transit, data collection and staged exfiltration happening on endpoints behind it are invisible — those techniques are removed.',
-  userInteraction: 'Without real users, phishing (T1566), drive-by compromise (T1189), and user execution (T1204) are impossible — those techniques are removed.',
-  internetExposed: 'Internet exposure makes Initial Access techniques far more likely — exploit of public-facing applications, drive-by compromise, and external phishing all require internet reachability.',
+  userInteraction: 'Without real users, phishing (T1566), drive-by compromise (T1189), user execution (T1204), and session theft (T1539) are impossible — those techniques are removed.',
+  internetExposed: 'Internet exposure makes Initial Access techniques far more likely — exploit of public-facing applications and external phishing require internet reachability. C2 traffic and lateral movement are also more visible on internet-facing products.',
   managesCredentials: 'Products that manage credentials are prime targets for brute force, credential stuffing, token theft, and session hijacking — Credential Access techniques are ranked higher.',
   highImpact: 'Business-critical assets warrant deeper coverage of Impact techniques — data destruction, ransomware encryption, and service disruption are ranked higher.',
   sensitiveData: 'When sensitive data is present, adversaries are more likely to pursue Collection and Exfiltration techniques to steal it — those techniques are ranked higher.',
@@ -226,15 +229,11 @@ const NO_DATA_AT_REST_DROP_TACTICS = new Set([
 ]);
 
 const USER_INTERACTION_DENYLIST = [
-  'T1566',
-  'T1189',
-  'T1204',
-  'T1539',
-  'T1622',
-  'T1557',
-  'T1606',
-  'T1195',
-  'T1525',
+  'T1566',  // Phishing — requires a user to receive and act on a message
+  'T1189',  // Drive-by Compromise — requires a user browsing to a malicious site
+  'T1204',  // User Execution — requires a user to run a malicious file/link
+  'T1539',  // Steal Web Session Cookie — requires an active user browser session
+  'T1622',  // Debugger Evasion — requires a user-facing process context
 ];
 
 const TACTIC_WEIGHTS: Record<string, number> = {
@@ -268,45 +267,90 @@ function techniqueMatchesPrefix(techniqueId: string, prefix: string): boolean {
   return normalized === prefix || normalized.startsWith(`${prefix}.`);
 }
 
-function inferScenarioAnswers(productName: string, platforms: string[]): ScenarioAnswers {
+function inferScenarioAnswersFromPlatforms(platforms: string[]): ScenarioAnswers {
   const normalizedPlatforms = normalizePlatformList(platforms);
+  if (normalizedPlatforms.length === 0) {
+    return DEFAULT_SCENARIO_ANSWERS;
+  }
+
   const platformSet = new Set(normalizedPlatforms);
-  const name = productName.toLowerCase();
-
   const endpointPlatforms: PlatformValue[] = ['Windows', 'Linux', 'macOS', 'Android', 'iOS'];
-  const endpointVisible = endpointPlatforms.some((entry) => platformSet.has(entry));
+  const userSurfacePlatforms: PlatformValue[] = ['Office 365', 'Office Suite', 'Google Workspace'];
+  const publicFacingPlatforms: PlatformValue[] = ['SaaS', 'IaaS', 'AWS', 'Azure', 'GCP', 'Network Devices'];
+  const credentialPlatforms: PlatformValue[] = ['Identity Provider', 'Azure AD', 'Office 365', 'Google Workspace'];
+  const highImpactPlatforms: PlatformValue[] = ['Identity Provider', 'Azure AD', 'Network Devices', 'ESXi', 'IaaS', 'AWS', 'Azure', 'GCP'];
+  const storedDataPlatforms: PlatformValue[] = ['SaaS', 'IaaS', 'AWS', 'Azure', 'GCP', 'Office 365', 'Office Suite', 'Google Workspace', 'Identity Provider', 'Azure AD', 'Containers', 'ESXi'];
 
-  const networkOnlyKeyword = /(gateway|proxy|firewall|load balancer|edge|waf|reverse proxy|api management|api gateway|ingress)/i;
-  const authKeyword = /(auth|identity|login|sso|oauth|oidc|iam|directory|entra|okta|access control|credential)/i;
-  const criticalKeyword = /(security|siem|xdr|edr|identity|api|database|data lake|vault|critical)/i;
-  const sensitiveKeyword = /(database|data lake|crm|erp|health|medical|financial|payment|pci|hipaa|gdpr|pii)/i;
-
-  const isNetworkOnly = platformSet.has('Network Devices') || networkOnlyKeyword.test(name);
-
-  const processVisibility = endpointVisible;
-  const dataAtRest = !isNetworkOnly;
-  const userInteraction = endpointVisible
-    || platformSet.has('Office 365')
-    || platformSet.has('Google Workspace')
-    || /email|browser|workspace|office|portal|service desk|ticket|collaboration/.test(name);
-  const internetExposed = isNetworkOnly || platformSet.has('SaaS') || platformSet.has('IaaS')
-    || /public|external|internet|edge|portal|api/.test(name);
-  const managesCredentials = platformSet.has('Identity Provider')
-    || platformSet.has('Office 365')
-    || platformSet.has('Google Workspace')
-    || authKeyword.test(name);
-  const highImpact = managesCredentials || criticalKeyword.test(name);
-  const sensitiveData = sensitiveKeyword.test(name);
+  const hasEndpointVisibility = endpointPlatforms.some((platform) => platformSet.has(platform));
+  const hasUserSurface = hasEndpointVisibility || userSurfacePlatforms.some((platform) => platformSet.has(platform));
+  const hasPublicSurface = publicFacingPlatforms.some((platform) => platformSet.has(platform));
+  const managesCredentials = credentialPlatforms.some((platform) => platformSet.has(platform));
+  const hasStoredData = storedDataPlatforms.some((platform) => platformSet.has(platform));
+  const isPassThroughOnly = platformSet.size > 0 && Array.from(platformSet).every((platform) => platform === 'Network Devices');
 
   return {
-    processVisibility,
-    dataAtRest,
-    userInteraction,
-    internetExposed,
+    processVisibility: hasEndpointVisibility || platformSet.has('ESXi'),
+    dataAtRest: hasStoredData || !isPassThroughOnly,
+    userInteraction: hasUserSurface,
+    internetExposed: hasPublicSurface,
     managesCredentials,
-    highImpact,
-    sensitiveData,
+    highImpact: managesCredentials || highImpactPlatforms.some((platform) => platformSet.has(platform)),
+    sensitiveData: userSurfacePlatforms.some((platform) => platformSet.has(platform)),
   };
+}
+
+function getSsmMappingRankingScore(mapping: SsmMapping): number {
+  const scoreCategory = (mapping.scoreCategory || '').toLowerCase();
+  const baseScoreMap: Record<string, number> = {
+    significant: 1.0,
+    partial: 0.6,
+    minimal: 0.3,
+  };
+  const baseScore = baseScoreMap[scoreCategory];
+  if (!baseScore) return 0;
+
+  const metadata = (mapping.metadata || {}) as Record<string, unknown>;
+  const validationStatus = typeof mapping.validationStatus === 'string'
+    ? mapping.validationStatus.toLowerCase()
+    : typeof metadata.validation_status === 'string'
+      ? String(metadata.validation_status).toLowerCase()
+      : '';
+  if (validationStatus === 'invalid') {
+    return 0;
+  }
+
+  const normalizedCoverageKind = typeof mapping.coverageKind === 'string'
+    ? mapping.coverageKind.toLowerCase()
+    : typeof metadata.coverage_kind === 'string'
+      ? String(metadata.coverage_kind).toLowerCase()
+      : '';
+  const normalizedMappingType = typeof mapping.mappingType === 'string'
+    ? mapping.mappingType.toLowerCase()
+    : '';
+  const coverageKind = normalizedCoverageKind || (normalizedMappingType === 'observe' ? 'visibility' : 'detect');
+
+  const coverageKindWeight: Record<string, number> = {
+    detect: 1,
+    visibility: 0.7,
+    candidate: 0.35,
+  };
+  const validationWeight: Record<string, number> = {
+    valid: 1,
+    uncertain: 0.6,
+    pending: 0.85,
+  };
+
+  const techniqueStatus = typeof metadata.technique_status === 'string'
+    ? String(metadata.technique_status).toLowerCase()
+    : '';
+  const techniqueStatusWeight = techniqueStatus === 'candidate'
+    ? 0.6
+    : 1;
+
+  const kindWeight = coverageKindWeight[coverageKind] ?? 0.8;
+  const qualityWeight = validationWeight[validationStatus] ?? 0.85;
+
+  return baseScore * kindWeight * qualityWeight * techniqueStatusWeight;
 }
 
 function getScenarioDropReasons(
@@ -332,8 +376,11 @@ function getScenarioDropReasons(
 function getScenarioBoostMultiplier(tactics: string[], answers: ScenarioAnswers): number {
   let multiplier = 1;
   const normalizedTactics = new Set(tactics.map(normalizeTacticKey));
-  if (answers.internetExposed && normalizedTactics.has('initial access')) {
-    multiplier *= 2.0;
+  if (answers.internetExposed) {
+    if (normalizedTactics.has('initial access')) multiplier *= 2.0;
+    // Internet-exposed products see C2 and lateral movement traffic
+    if (normalizedTactics.has('command and control')) multiplier *= 1.5;
+    if (normalizedTactics.has('lateral movement')) multiplier *= 1.5;
   }
   if (answers.managesCredentials && normalizedTactics.has('credential access')) {
     multiplier *= 2.0;
@@ -654,7 +701,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const { data: productData, refetch: refetchProduct } = useQuery<ProductData>({
     queryKey: ['product', productKey],
     queryFn: async () => {
-      const res = await fetch(`/api/products/${productKey}`);
+      const res = await fetch(`/api/products/${productKey}`, { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch product');
       return res.json();
     },
@@ -664,7 +711,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const { data: productAliases = [] } = useQuery<ProductAlias[]>({
     queryKey: ['product-aliases', productKey],
     queryFn: async () => {
-      const res = await fetch(`/api/products/${productKey}/aliases`);
+      const res = await fetch(`/api/products/${productKey}/aliases`, { credentials: 'include' });
       if (res.status === 404) return [];
       if (!res.ok) throw new Error('Failed to fetch product aliases');
       return res.json();
@@ -676,7 +723,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   const { data: productStreams = [] } = useQuery<ProductStreamRow[]>({
     queryKey: ['product-streams', productStreamId],
     queryFn: async () => {
-      const res = await fetch(`/api/products/${encodeURIComponent(String(productStreamId))}/streams`);
+      const res = await fetch(`/api/products/${encodeURIComponent(String(productStreamId))}/streams`, { credentials: 'include' });
       if (!res.ok) throw new Error('Failed to fetch product streams');
       const payload = await res.json();
       return Array.isArray(payload?.streams) ? payload.streams : [];
@@ -1105,7 +1152,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
   useEffect(() => {
     const scenarioKey = `${productKey}|${productTitle}|${allPlatforms.join(',')}`;
     if (scenarioDefaultsKeyRef.current === scenarioKey) return;
-    setScenarioAnswers(inferScenarioAnswers(productTitle, allPlatforms));
+    setScenarioAnswers(inferScenarioAnswersFromPlatforms(allPlatforms));
     setScenarioFilterEnabled(false);
     setScenarioShowAll(false);
     setScenarioMaxTechniques(12);
@@ -1160,6 +1207,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
           techniqueIds: stixTechniqueIds,
           platforms: stixMappingPlatforms.length > 0 ? stixMappingPlatforms : undefined,
         }),
+        credentials: 'include',
       });
       if (!res.ok) throw new Error('Failed to fetch SSM technique mapping');
       return res.json();
@@ -1174,6 +1222,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ alias }),
+        credentials: 'include',
       });
       if (!res.ok) {
         const error = await res.json();
@@ -1191,6 +1240,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     mutationFn: async (aliasId: number) => {
       const res = await fetch(`/api/products/${productKey}/aliases/${aliasId}`, {
         method: 'DELETE',
+        credentials: 'include',
       });
       if (!res.ok) {
         const error = await res.json();
@@ -2159,6 +2209,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       analyticCount: number;
       dataComponents: Set<string>;
       communityHits: number;
+      ssmScore: number; // 0–1 from wizard/SSM/graph coverage evidence
     };
 
     const metrics = new Map<string, Metric>();
@@ -2179,6 +2230,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         analyticCount: 0,
         dataComponents: new Set<string>(),
         communityHits: 0,
+        ssmScore: 0,
       };
       metrics.set(normalized, created);
       return created;
@@ -2247,6 +2299,19 @@ export function ProductView({ product, onBack }: ProductViewProps) {
       );
     }
 
+    // Ingest SSM/wizard coverage as scoring evidence, but weight it by
+    // mapping kind and validation quality so weak or rejected mappings do
+    // not rank the same as confirmed detection coverage.
+    ssmCapabilities.forEach((cap) => {
+      cap.mappings.forEach((mapping) => {
+        const normalized = normalizeTechniqueId(mapping.techniqueId);
+        const metric = upsertMetric(normalized);
+        const score = getSsmMappingRankingScore(mapping);
+        if (score <= 0) return;
+        metric.ssmScore = Math.max(metric.ssmScore, score);
+      });
+    });
+
     const metricValues = Array.from(metrics.values());
     const maxStrategyCount = Math.max(1, ...metricValues.map((metric) => metric.strategyCount));
     const maxAnalyticCount = Math.max(1, ...metricValues.map((metric) => metric.analyticCount));
@@ -2282,10 +2347,16 @@ export function ProductView({ product, onBack }: ProductViewProps) {
         const strategyNorm = metric.strategyCount / maxStrategyCount;
         const analyticNorm = metric.analyticCount / maxAnalyticCount;
         const dcNorm = metric.dataComponents.size / maxDataComponents;
-        // When no strategies exist (Sigma/Splunk-only products), use analytic+DC as baseline
-        const rawBase = hasAnyStrategies
+        // Combine strategy/analytic/DC evidence with SSM/wizard coverage.
+        // SSM score lets guided/validated product coverage contribute to ranking
+        // even when community adapters found no direct rules for the technique.
+        const hasStrategyEvidence = strategyNorm > 0 || analyticNorm > 0 || dcNorm > 0;
+        const communityBase = hasAnyStrategies
           ? (0.4 * strategyNorm) + (0.3 * analyticNorm) + (0.3 * dcNorm)
           : (0.5 * analyticNorm) + (0.5 * dcNorm);
+        const rawBase = hasStrategyEvidence
+          ? Math.max(communityBase, metric.ssmScore * 0.8)
+          : metric.ssmScore;
 
         // Mutable-field fidelity: 0.5–1.0 based on verified DC overlap (Spec §6.3)
         let fidelity = 1.0;
@@ -2354,6 +2425,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
     scenarioMaxTechniques,
     scenarioOverrideTechniqueIds,
     scenarioShowAll,
+    ssmCapabilities,
     ssmVisibilityCoverage,
     strategies,
     stixTechniqueIds,
@@ -4717,7 +4789,7 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                       </Popover>
                     </h3>
                     <p className="text-sm text-muted-foreground mt-1">
-                      Answer 6 questions about how this product is deployed to rank techniques by relevance and remove inapplicable ones.
+                      Answer {SCENARIO_QUESTION_COUNT} questions about how this product is deployed to rank techniques by relevance and remove inapplicable ones.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -4782,9 +4854,10 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                     type="button"
                     size="sm"
                     variant="ghost"
-                    onClick={() => setScenarioAnswers(inferScenarioAnswers(productTitle, allPlatforms))}
+                    disabled={!scenarioFilterEnabled}
+                    onClick={() => setScenarioAnswers(inferScenarioAnswersFromPlatforms(allPlatforms))}
                   >
-                    Auto-detect from product
+                    Reset Suggested Answers
                   </Button>
                 </div>
 
@@ -4810,60 +4883,59 @@ export function ProductView({ product, onBack }: ProductViewProps) {
                 )}
 
                 {scenarioFilterEnabled && totalScenarioExcluded > 0 && (
-                  <div className="mt-4 rounded-md border border-border/60 bg-background/60 p-3 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-xs font-medium text-foreground">
-                        Excluded Techniques ({totalScenarioExcluded})
-                      </div>
+                  <details className="mt-4 rounded-md border border-border/60 bg-background/60 p-3">
+                    <summary className="cursor-pointer text-xs font-medium text-foreground select-none flex items-center justify-between gap-2">
+                      <span>Excluded Techniques ({totalScenarioExcluded})</span>
                       {scenarioOverrideTechniqueIds.size > 0 && (
                         <Button
                           type="button"
                           size="sm"
                           variant="ghost"
-                          onClick={clearScenarioOverrides}
+                          onClick={(e) => { e.preventDefault(); clearScenarioOverrides(); }}
                           className="h-7 text-xs"
                         >
                           Clear Overrides ({scenarioOverrideTechniqueIds.size})
                         </Button>
                       )}
+                    </summary>
+                    <div className="mt-3 space-y-3">
+                      {(Object.entries(excludedTechniquesByReason) as [ScenarioDropReason, string[]][]).map(([reason, techIds]) => {
+                        if (techIds.length === 0) return null;
+                        return (
+                          <div key={reason}>
+                            <div className="text-xs text-muted-foreground mb-1.5">
+                              {SCENARIO_QUESTION_LABELS[reason]} ({techIds.length})
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {techIds.map((techId) => {
+                                const isOverridden = scenarioOverrideTechniqueIds.has(normalizeTechniqueId(techId));
+                                return (
+                                  <button
+                                    key={`override-${reason}-${techId}`}
+                                    type="button"
+                                    onClick={() => toggleScenarioOverrideTechnique(techId)}
+                                    className={cn(
+                                      "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
+                                      isOverridden
+                                        ? "border-primary/60 bg-primary/10 text-foreground"
+                                        : "border-border bg-muted/30 text-muted-foreground hover:text-foreground hover:border-primary/40"
+                                    )}
+                                    data-testid={`button-scenario-override-${techId}`}
+                                  >
+                                    <code className="font-mono text-[10px] text-red-600">{techId}</code>
+                                    <span>{getTechniqueName(techId)}</span>
+                                    <span className="text-[10px]">
+                                      {isOverridden ? 'Remove' : 'Add Back'}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-
-                    {(Object.entries(excludedTechniquesByReason) as [ScenarioDropReason, string[]][]).map(([reason, techIds]) => {
-                      if (techIds.length === 0) return null;
-                      return (
-                        <div key={reason}>
-                          <div className="text-xs text-muted-foreground mb-1.5">
-                            {SCENARIO_QUESTION_LABELS[reason]} ({techIds.length})
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {techIds.map((techId) => {
-                              const isOverridden = scenarioOverrideTechniqueIds.has(normalizeTechniqueId(techId));
-                              return (
-                                <button
-                                  key={`override-${reason}-${techId}`}
-                                  type="button"
-                                  onClick={() => toggleScenarioOverrideTechnique(techId)}
-                                  className={cn(
-                                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
-                                    isOverridden
-                                      ? "border-primary/60 bg-primary/10 text-foreground"
-                                      : "border-border bg-muted/30 text-muted-foreground hover:text-foreground hover:border-primary/40"
-                                  )}
-                                  data-testid={`button-scenario-override-${techId}`}
-                                >
-                                  <code className="font-mono text-[10px] text-red-600">{techId}</code>
-                                  <span>{getTechniqueName(techId)}</span>
-                                  <span className="text-[10px]">
-                                    {isOverridden ? 'Remove' : 'Add Back'}
-                                  </span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                  </details>
                 )}
 
                 {scenarioFilterEnabled && (
